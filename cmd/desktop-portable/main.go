@@ -114,6 +114,7 @@ func main() {
 	os.Setenv("GOCLAW_DESKTOP", "1")
 	os.Setenv("GOCLAW_HOST", Config.GatewayHost)
 	os.Setenv("GOCLAW_DATA_DIR", Config.GoclawData)
+	os.Setenv("GOCLAW_WORKSPACE", filepath.Join(Config.GoclawData, "workspace"))
 
 	pg0Exe = filepath.Join(root, "pg0.exe")
 	os.Remove(filepath.Join(Config.Pg0DataDir, "postmaster.pid"))
