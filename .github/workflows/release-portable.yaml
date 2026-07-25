@@ -45,9 +45,12 @@ jobs:
         shell: bash
         run: choco install mingw -y --no-progress
 
-      - name: Add webview dependency
+      - name: Add Go dependencies
         shell: bash
-        run: go get github.com/webview/webview_go@latest
+        run: |
+          go get github.com/webview/webview_go@latest
+          go get github.com/getlantern/systray@latest
+          go get github.com/pkg/browser@latest
 
       - name: Build web UI
         shell: bash

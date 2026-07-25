@@ -11,10 +11,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
+	"github.com/getlantern/systray"
+	"github.com/pkg/browser"
 	webview "github.com/webview/webview_go"
 )
 
@@ -42,7 +46,18 @@ var Config = struct {
 	HealthPath:   "/health",
 }
 
+var (
+	goclawCmd    *exec.Cmd
+	pg0Exe       string
+	w            webview.WebView
+	isWindowOpen bool
+	user32       = syscall.NewLazyDLL("user32.dll")
+	showWindow   = user32.NewProc("ShowWindow")
+)
+
 func main() {
+	runtime.LockOSThread()
+
 	root := executableDir()
 	dataDir := filepath.Join(root, "data")
 	Config.Pg0DataDir = filepath.Join(dataDir, "pg0")
@@ -67,36 +82,62 @@ func main() {
 	os.Setenv("GOCLAW_HOST", Config.GatewayHost)
 	os.Setenv("GOCLAW_DATA_DIR", Config.GoclawData)
 
-	pg0Exe := filepath.Join(root, "pg0.exe")
+	pg0Exe = filepath.Join(root, "pg0.exe")
 	os.Remove(filepath.Join(Config.Pg0DataDir, "postmaster.pid"))
 
 	log.Println("Booting pg0 database...")
 	runSilent(pg0Exe, "start", "--name", "goclaw-portable", "--data-dir", Config.Pg0DataDir, "--database", "goclaw")
 	waitForPort(Config.Pg0Host, Config.Pg0Port, Config.StartTimeout)
 
-	// Add pg0's bundled PostgreSQL bin dir to PATH (pg_dump, pg_restore, etc.)
 	if pg0Bin := findPg0BinDir(); pg0Bin != "" {
 		os.Setenv("PATH", pg0Bin+";"+os.Getenv("PATH"))
 	}
-
-	// Add bundled Python + pip to PATH
 	if pythonDir := findPythonDir(root); pythonDir != "" {
 		os.Setenv("PATH", pythonDir+";"+os.Getenv("PATH"))
 	}
-
-	// Add bundled uv to PATH
 	if uvDir := findUvDir(root); uvDir != "" {
 		os.Setenv("PATH", uvDir+";"+os.Getenv("PATH"))
 	}
 
 	goclawExe := filepath.Join(root, "goclaw.exe")
-	goclawCmd := startSilent(goclawExe)
+	goclawCmd = startSilent(goclawExe)
 	waitForURL(gatewayURL(Config.HealthPath), Config.StartTimeout)
 
-	log.Println("GoClaw is ready — opening window...")
+	log.Println("GoClaw background services ready — starting system tray...")
+	systray.Run(onReady, onExit)
+}
 
-	w := webview.New(false)
-	defer w.Destroy()
+func onReady() {
+	systray.SetIcon(iconData())
+	systray.SetTitle(Config.WindowTitle)
+	systray.SetTooltip(Config.WindowTitle)
+
+	mShow := systray.AddMenuItem("Show Window", "Open the GoClaw desktop window")
+	mOpenWeb := systray.AddMenuItem("Open Web UI", "Open GoClaw in your default browser")
+	systray.AddSeparator()
+	mQuit := systray.AddMenuItem("Quit GoClaw", "Shut down all background processes")
+
+	go func() {
+		for {
+			select {
+			case <-mShow.ClickedCh:
+				showAppWindow()
+			case <-mOpenWeb.ClickedCh:
+				log.Printf("Opening browser at %s", gatewayURL(""))
+				browser.OpenURL(gatewayURL(""))
+			case <-mQuit.ClickedCh:
+				systray.Quit()
+				return
+			}
+		}
+	}()
+
+	go spawnWebview()
+}
+
+func spawnWebview() {
+	runtime.LockOSThread()
+	w = webview.New(false)
 
 	token := os.Getenv("GOCLAW_GATEWAY_TOKEN")
 	if token != "" {
@@ -114,11 +155,70 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 	w.SetTitle(Config.WindowTitle)
 	w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
 	w.Navigate(gatewayURL(""))
+	isWindowOpen = true
 	w.Run()
+	isWindowOpen = false
+}
 
-	log.Println("Shutting down...")
+func showAppWindow() {
+	if w == nil {
+		go spawnWebview()
+		return
+	}
+	w.Dispatch(func() {
+		hwnd := w.Window()
+		if hwnd != nil {
+			showWindow.Call(uintptr(hwnd), 5)
+		}
+		w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
+	})
+}
+
+func hideAppWindow() {
+	if w == nil {
+		return
+	}
+	w.Dispatch(func() {
+		hwnd := w.Window()
+		if hwnd != nil {
+			showWindow.Call(uintptr(hwnd), 0)
+		}
+	})
+}
+
+func onExit() {
+	log.Println("Shutting down core processes...")
+
+	if w != nil {
+		w.Dispatch(func() {
+			hwnd := w.Window()
+			if hwnd != nil {
+				showWindow.Call(uintptr(hwnd), 0)
+			}
+		})
+		w.Destroy()
+	}
+
 	shutdownGoclaw(goclawCmd)
-	runSilent(pg0Exe, "stop", "--name", "goclaw-portable")
+
+	if pg0Exe != "" {
+		runSilent(pg0Exe, "stop", "--name", "goclaw-portable")
+	}
+
+	os.Exit(0)
+}
+
+func iconData() []byte {
+	return []byte{
+		0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x10, 0x10,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x68, 0x05,
+		0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x28, 0x00,
+		0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x20, 0x00,
+		0x00, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
 }
 
 func shutdownGoclaw(cmd *exec.Cmd) {
@@ -127,7 +227,6 @@ func shutdownGoclaw(cmd *exec.Cmd) {
 	}
 	pid := cmd.Process.Pid
 	log.Printf("Sending graceful shutdown to goclaw (PID %d)...", pid)
-	// taskkill without /F sends Ctrl+C which triggers Go's signal.Notify handler
 	exec.Command("taskkill", "/PID", fmt.Sprintf("%d", pid)).Run()
 	done := make(chan struct{})
 	go func() {
@@ -244,7 +343,6 @@ func findPg0BinDir() string {
 	if err != nil {
 		return ""
 	}
-	// Scan versioned dirs (e.g. "18.1.0") for bin/pg_dump.exe
 	for _, e := range entries {
 		if e.IsDir() {
 			bin := filepath.Join(installDir, e.Name(), "bin")
