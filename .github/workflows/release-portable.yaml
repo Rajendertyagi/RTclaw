@@ -3,14 +3,14 @@ name: Release Portable Desktop
 on:
   push:
     tags:
-      - 'portable-v*'
-      - 'portable-latest'
+      - "portable-v*"
+      - "portable-latest"
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (leave blank for auto build timestamp)'
+        description: "Release tag (leave blank for auto build timestamp)"
         required: false
-        default: ''
+        default: ""
 
 permissions:
   contents: write
@@ -25,7 +25,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
+          go-version: "stable"
           cache: true
 
       - uses: actions/setup-node@v4
@@ -35,7 +35,7 @@ jobs:
       - name: Set up Python (for bootstrapping embeddable)
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install pnpm
         shell: bash
@@ -52,7 +52,8 @@ jobs:
       - name: Build web UI
         shell: bash
         run: |
-          cd ui/web && pnpm install --frozen-lockfile && pnpm build && cd ../..
+          cd ui/web
+          pnpm install --frozen-lockfile && pnpm build && cd ../..
           mkdir -p internal/webui/dist
           cp -r ui/web/dist/* internal/webui/dist/
 
@@ -67,18 +68,6 @@ jobs:
           cd cmd/desktop-portable
           go build -ldflags="-s -w" -o ../../build/goclaw-portable.exe .
 
-      - name: Determine release tag
-        id: tag
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          elif [ -n "${{ inputs.tag }}" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=portable-build-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Get latest pg0 version
         id: pg0ver
         shell: bash
@@ -86,73 +75,35 @@ jobs:
           TAG=$(curl -sL https://api.github.com/repos/vectorize-io/pg0/releases/latest | \
             grep '"tag_name"' | cut -d'"' -f4)
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Resolved pg0 latest: $TAG"
 
-      - name: Get Python version
-        id: pyver
+      - name: Download pg0 (embedded PostgreSQL)
         shell: bash
         run: |
-          VER=$(python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "Python version: $VER"
-
-      - name: Cache pg0
-        id: cache-pg0
-        uses: actions/cache@v4
-        with:
-          path: build/pg0.exe
-          key: pg0-${{ steps.pg0ver.outputs.version }}
-
-      - name: Cache Python embeddable (post-setup)
-        id: cache-python
-        uses: actions/cache@v4
-        with:
-          path: build/python
-          key: python-embed-${{ steps.pyver.outputs.version }}
-
-      - name: Cache uv
-        id: cache-uv
-        uses: actions/cache@v4
-        with:
-          path: build/uv.exe
-          key: uv-latest
-
-      - name: Download pg0
-        if: steps.cache-pg0.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          mkdir -p build
           curl -L -o build/pg0.exe \
             "https://github.com/vectorize-io/pg0/releases/download/${{ steps.pg0ver.outputs.version }}/pg0-windows-x86_64.exe"
 
       - name: Download Python embeddable
-        if: steps.cache-python.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          mkdir -p build
-          curl -fSL -o build/python-embed.zip \
-            "https://www.python.org/ftp/python/${{ steps.pyver.outputs.version }}/python-${{ steps.pyver.outputs.version }}-embed-amd64.zip"
-          test -s build/python-embed.zip || { echo "Downloaded file is empty"; exit 1; }
+          PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
+          curl -sL -o build/python-embed.zip \
+            "https://www.python.org/ftp/python/$PY_VER/python-$PY_VER-embed-amd64.zip"
           unzip -o build/python-embed.zip -d build/python/
           rm build/python-embed.zip
 
       - name: Setup Python embeddable (site + pip3 + python3 alias)
-        if: steps.cache-python.outputs.cache-hit != 'true'
         shell: bash
         run: |
           cd build/python
-          PTH=$(ls python*.pth python*._pth 2>/dev/null | head -1)
-          [ -n "$PTH" ] && sed -i 's/^#import site/import site/' "$PTH"
+          sed -i 's/^#import site/import site/' python._pth
           cp python.exe python3.exe
           curl -sL -o get-pip.py https://bootstrap.pypa.io/get-pip.py
           ./python3.exe get-pip.py --no-warn-script-location
           rm get-pip.py
 
       - name: Download uv
-        if: steps.cache-uv.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          mkdir -p build
           curl -sL -o build/uv.zip \
             https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip
           unzip -o build/uv.zip -d build/uv-tmp
@@ -172,5 +123,5 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: goclaw-portable-windows-amd64.zip
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: GoClaw Portable ${{ steps.tag.outputs.tag }} (Windows x64)
+          tag_name: ${{ github.ref_name }}
+          name: GoClaw Portable ${{ github.ref_name }} (Windows x64)
