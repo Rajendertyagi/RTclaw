@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"bufio"
 	"crypto/rand"
 	"encoding/hex"
@@ -22,6 +23,9 @@ import (
 	"github.com/pkg/browser"
 	webview "github.com/webview/webview_go"
 )
+
+//go:embed icon.ico
+var tbIconData []byte
 
 var Config = struct {
 	GatewayHost  string
