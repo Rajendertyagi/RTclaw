@@ -131,7 +131,7 @@ jobs:
         run: |
           mkdir -p build
           curl -fSL -o build/python-embed.zip \
-            "https://www.python.org/ftp/python/${{ steps.pyver.outputs.version }}/python-${{ steps.pyver.outputs.version }}-embed-win64.zip"
+            "https://www.python.org/ftp/python/${{ steps.pyver.outputs.version }}/python-${{ steps.pyver.outputs.version }}-embed-amd64.zip"
           test -s build/python-embed.zip || { echo "Downloaded file is empty"; exit 1; }
           unzip -o build/python-embed.zip -d build/python/
           rm build/python-embed.zip
