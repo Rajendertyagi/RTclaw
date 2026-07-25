@@ -19,12 +19,13 @@ jobs:
         shell: bash
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: 'latest'
+          go-version: 'stable'
+          cache: true
 
       - name: Download Go modules
         run: go mod download
@@ -37,7 +38,7 @@ jobs:
 
       - name: Download pg0 Windows binary
         run: |
-          curl -L -o pg0.exe "https://github.com/vectorize-io/pg0/releases/latest/download/pg0-windows-x86_64.exe"
+          curl -L -o pg0.exe "https://github.com/vectorize-io/pg0/releases/download/v0.14.2/pg0-windows-x86_64.exe"
 
       - name: Package bundle
         run: |
@@ -64,7 +65,7 @@ jobs:
           fi
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: goclaw-standard-windows-x64.zip
           tag_name: ${{ steps.tag.outputs.tag }}
