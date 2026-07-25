@@ -30,13 +30,17 @@ jobs:
 
       - name: Package bundle
         run: |
-          mkdir -p dist/goclaw-standard-windows-x64
+          mkdir -p dist/goclaw-standard-windows-x64/migrations
+          mkdir -p dist/goclaw-standard-windows-x64/scripts
+          mkdir -p dist/goclaw-standard-windows-x64/data
           cp goclaw.exe dist/goclaw-standard-windows-x64/
           cp pg0.exe dist/goclaw-standard-windows-x64/
-          mkdir -p dist/goclaw-standard-windows-x64/migrations
           cp -r migrations/* dist/goclaw-standard-windows-x64/migrations/
-          mkdir -p dist/goclaw-standard-windows-x64/scripts
           cp scripts/start-standard.ps1 dist/goclaw-standard-windows-x64/start.ps1
+
+      - name: Compress Bundle Archive
+        shell: powershell
+        run: |
           Compress-Archive -Path dist/goclaw-standard-windows-x64/* -DestinationPath goclaw-standard-windows-x64.zip
 
       - name: Upload Release Asset
