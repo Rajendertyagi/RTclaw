@@ -31,6 +31,11 @@ jobs:
         with:
           node-version: lts/*
 
+      - name: Set up Python (for bootstrapping embeddable)
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
       - name: Install pnpm
         shell: bash
         run: npm install -g pnpm
@@ -85,6 +90,38 @@ jobs:
           else
             echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
           fi
+
+      - name: Download Python embeddable
+        shell: bash
+        run: |
+          PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
+          curl -sL -o build/python-embed.zip \
+            "https://www.python.org/ftp/python/$PY_VER/python-$PY_VER-embed-win64.zip"
+          unzip -o build/python-embed.zip -d build/python/
+          rm build/python-embed.zip
+
+      - name: Setup Python embeddable (site + pip3 + python3 alias)
+        shell: bash
+        run: |
+          cd build/python
+          # Enable site-packages so pip can install packages
+          sed -i 's/^#import site/import site/' python._pth
+          # Create python3.exe alias (GoClaw looks for "python3")
+          cp python.exe python3.exe
+          # Bootstrap pip into the embeddable
+          curl -sL -o get-pip.py https://bootstrap.pypa.io/get-pip.py
+          ./python3.exe get-pip.py --no-warn-script-location
+          rm get-pip.py
+          # pip3.exe is now in build/python/Scripts/
+
+      - name: Download uv
+        shell: bash
+        run: |
+          curl -sL -o build/uv.zip \
+            https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip
+          unzip -o build/uv.zip -d build/uv-tmp
+          mv build/uv-tmp/uv.exe build/uv.exe
+          rm -rf build/uv.zip build/uv-tmp
 
       - name: Copy migrations
         shell: bash

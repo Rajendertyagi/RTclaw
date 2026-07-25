@@ -79,6 +79,16 @@ func main() {
 		os.Setenv("PATH", pg0Bin+";"+os.Getenv("PATH"))
 	}
 
+	// Add bundled Python + pip to PATH
+	if pythonDir := findPythonDir(root); pythonDir != "" {
+		os.Setenv("PATH", pythonDir+";"+os.Getenv("PATH"))
+	}
+
+	// Add bundled uv to PATH
+	if uvDir := findUvDir(root); uvDir != "" {
+		os.Setenv("PATH", uvDir+";"+os.Getenv("PATH"))
+	}
+
 	goclawExe := filepath.Join(root, "goclaw.exe")
 	goclawCmd := startSilent(goclawExe)
 	waitForURL(gatewayURL(Config.HealthPath), Config.StartTimeout)
@@ -222,6 +232,25 @@ func findPg0BinDir() string {
 				return bin
 			}
 		}
+	}
+	return ""
+}
+
+func findPythonDir(root string) string {
+	pyDir := filepath.Join(root, "python")
+	if info, err := os.Stat(filepath.Join(pyDir, "python3.exe")); err == nil && !info.IsDir() {
+		scriptsDir := filepath.Join(pyDir, "Scripts")
+		if info, err := os.Stat(filepath.Join(scriptsDir, "pip3.exe")); err == nil && !info.IsDir() {
+			return pyDir + ";" + scriptsDir
+		}
+		return pyDir
+	}
+	return ""
+}
+
+func findUvDir(root string) string {
+	if info, err := os.Stat(filepath.Join(root, "uv.exe")); err == nil && !info.IsDir() {
+		return root
 	}
 	return ""
 }
