@@ -12,8 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -76,7 +76,7 @@ var (
 	goclawCmd             *exec.Cmd
 	pg0Exe                 string
 	w                      webview.WebView
-	isWindowOpen           bool
+	quitting               atomic.Bool
 	user32                 = syscall.NewLazyDLL("user32.dll")
 	showWindow             = user32.NewProc("ShowWindow")
 	procGetWindowPlacement = user32.NewProc("GetWindowPlacement")
@@ -85,8 +85,6 @@ var (
 )
 
 func main() {
-	runtime.LockOSThread()
-
 	root := executableDir()
 	dataDir := filepath.Join(root, "data")
 	Config.Pg0DataDir = filepath.Join(dataDir, "pg0")
@@ -104,6 +102,7 @@ func main() {
 		loadDotEnv(dotEnv)
 	}
 
+	os.Setenv("GOCLAW_CONFIG", filepath.Join(root, "config.json"))
 	os.Setenv("GOCLAW_POSTGRES_DSN", pgDSN())
 	os.Setenv("GOCLAW_EDITION", "standard")
 	os.Setenv("GOCLAW_AUTO_UPGRADE", "true")
@@ -133,7 +132,41 @@ func main() {
 	waitForURL(gatewayURL(Config.HealthPath), Config.StartTimeout)
 
 	log.Println("GoClaw background services ready — starting system tray...")
-	systray.Run(onReady, onExit)
+	systray.Register(onReady, nil)
+
+	// Webview must be on the main thread; systray.Register sets up the tray
+	// without blocking, so the webview message loop pumps both windows.
+	token := os.Getenv("GOCLAW_GATEWAY_TOKEN")
+	w = webview.New(false)
+	if token != "" {
+		initJS := fmt.Sprintf(`(function(){
+var k="goclaw:auth";
+if(!localStorage.getItem(k)){
+localStorage.setItem(k,JSON.stringify({
+state:{token:"%s",userId:"system",senderID:""},version:0
+}));
+}
+})()`, token)
+		w.Init(initJS)
+	}
+	w.SetTitle(Config.WindowTitle)
+	w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
+	w.Navigate(gatewayURL(""))
+
+	hwnd := w.Window()
+	if hwnd != nil {
+		loadWindowPlacement(uintptr(hwnd))
+	}
+
+	w.Run()
+	w.Destroy()
+
+	log.Println("Shutting down core processes...")
+	shutdownGoclaw(goclawCmd)
+	if pg0Exe != "" {
+		runSilent(pg0Exe, "stop", "--name", "goclaw-portable")
+	}
+	os.Exit(0)
 }
 
 func onReady() {
@@ -150,56 +183,29 @@ func onReady() {
 		for {
 			select {
 			case <-mShow.ClickedCh:
-				showAppWindow()
+				w.Dispatch(func() {
+					hwnd := w.Window()
+					if hwnd != nil {
+						showWindow.Call(uintptr(hwnd), 5)
+					}
+				})
 			case <-mOpenWeb.ClickedCh:
 				log.Printf("Opening browser at %s", gatewayURL(""))
 				browser.OpenURL(gatewayURL(""))
 			case <-mQuit.ClickedCh:
+				quitting.Store(true)
+				hwnd := w.Window()
+				if hwnd != nil {
+					saveWindowPlacement(uintptr(hwnd))
+				}
 				systray.Quit()
 				return
 			}
 		}
 	}()
-
-	go spawnWebview()
-}
-
-func spawnWebview() {
-	runtime.LockOSThread()
-	w = webview.New(false)
-
-	token := os.Getenv("GOCLAW_GATEWAY_TOKEN")
-	if token != "" {
-		initJS := fmt.Sprintf(`(function(){
-var k="goclaw:auth";
-if(!localStorage.getItem(k)){
-localStorage.setItem(k,JSON.stringify({
-state:{token:"%s",userId:"system",senderID:""},version:0
-}));
-}
-})()`, token)
-		w.Init(initJS)
-	}
-
-	w.SetTitle(Config.WindowTitle)
-	w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
-	w.Navigate(gatewayURL(""))
-
-	hwnd := w.Window()
-	if hwnd != nil {
-		loadWindowPlacement(uintptr(hwnd))
-	}
-
-	isWindowOpen = true
-	w.Run()
-	isWindowOpen = false
 }
 
 func showAppWindow() {
-	if w == nil {
-		go spawnWebview()
-		return
-	}
 	w.Dispatch(func() {
 		hwnd := w.Window()
 		if hwnd != nil {
@@ -207,41 +213,6 @@ func showAppWindow() {
 		}
 		w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
 	})
-}
-
-func hideAppWindow() {
-	if w == nil {
-		return
-	}
-	w.Dispatch(func() {
-		hwnd := w.Window()
-		if hwnd != nil {
-			showWindow.Call(uintptr(hwnd), 0)
-		}
-	})
-}
-
-func onExit() {
-	log.Println("Shutting down core processes...")
-
-	if w != nil {
-		w.Dispatch(func() {
-			hwnd := w.Window()
-			if hwnd != nil {
-				showWindow.Call(uintptr(hwnd), 0)
-				saveWindowPlacement(uintptr(hwnd))
-			}
-		})
-		w.Destroy()
-	}
-
-	shutdownGoclaw(goclawCmd)
-
-	if pg0Exe != "" {
-		runSilent(pg0Exe, "stop", "--name", "goclaw-portable")
-	}
-
-	os.Exit(0)
 }
 
 func iconData() []byte {
@@ -370,6 +341,11 @@ func waitForPort(host string, port int, timeout time.Duration) {
 }
 
 func findPg0BinDir() string {
+	root := executableDir()
+	bin := filepath.Join(root, "bin")
+	if info, err := os.Stat(filepath.Join(bin, "pg_dump.exe")); err == nil && !info.IsDir() {
+		return bin
+	}
 	home, _ := os.UserHomeDir()
 	if home == "" {
 		return ""
@@ -392,9 +368,9 @@ func findPg0BinDir() string {
 
 func findPythonDir(root string) string {
 	pyDir := filepath.Join(root, "python")
-	if info, err := os.Stat(filepath.Join(pyDir, "python3.exe")); err == nil && !info.IsDir() {
+	if info, err := os.Stat(filepath.Join(pyDir, "python.exe")); err == nil && !info.IsDir() {
 		scriptsDir := filepath.Join(pyDir, "Scripts")
-		if info, err := os.Stat(filepath.Join(scriptsDir, "pip3.exe")); err == nil && !info.IsDir() {
+		if info, err := os.Stat(filepath.Join(scriptsDir, "pip.exe")); err == nil && !info.IsDir() {
 			return pyDir + ";" + scriptsDir
 		}
 		return pyDir
