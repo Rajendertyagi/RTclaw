@@ -82,6 +82,20 @@ func main() {
 
 	w := webview.New(false)
 	defer w.Destroy()
+
+	token := os.Getenv("GOCLAW_GATEWAY_TOKEN")
+	if token != "" {
+		initJS := fmt.Sprintf(`(function(){
+var k="goclaw:auth";
+if(!localStorage.getItem(k)){
+localStorage.setItem(k,JSON.stringify({
+state:{token:"%s",userId:"system",senderID:""},version:0
+}));
+}
+})()`, token)
+		w.Init(initJS)
+	}
+
 	w.SetTitle(Config.WindowTitle)
 	w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
 	w.Navigate(gatewayURL(""))
