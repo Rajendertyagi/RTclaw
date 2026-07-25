@@ -1,0 +1,51 @@
+name: Build GoClaw Standard Windows x64
+
+on:
+  push:
+    tags:
+      - 'standard-v*'
+  workflow_dispatch:
+
+jobs:
+  bundle:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build GoClaw
+        run: make build
+
+      - name: Download PG Windows binaries
+        run: |
+          curl -L -o pg17-windows.zip "https://get.enterprisedb.com/postgresql/postgresql-17.4-1-windows-x64-binaries.zip"
+          unzip -o pg17-windows.zip -d pg17-windows/
+
+      - name: Download pgvector Windows binary
+        run: |
+          curl -L -o pgvector-windows.tar.gz "https://github.com/portalcorp/pgvector_compiled/releases/download/v0.7.0/pgvector-0.7.0-windows-x64.tar.gz"
+          mkdir -p pgvector
+          tar -xzf pgvector-windows.tar.gz -C pgvector/
+
+      - name: Package bundle
+        run: |
+          mkdir -p dist/goclaw-standard-windows-x64
+          cp goclaw.exe dist/goclaw-standard-windows-x64/
+          cp -r pg17-windows/ dist/goclaw-standard-windows-x64/pg/
+          cp -r pgvector/ dist/goclaw-standard-windows-x64/pgvector/
+          cp -r migrations/ dist/goclaw-standard-windows-x64/migrations/ 2>/dev/null || true
+          mkdir -p dist/goclaw-standard-windows-x64/scripts
+          cp scripts/start-standard.ps1 dist/goclaw-standard-windows-x64/start.ps1
+          Compress-Archive -Path dist/goclaw-standard-windows-x64/* -DestinationPath goclaw-standard-windows-x64.zip
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: goclaw-standard-windows-x64.zip
+          tag_name: standard-v0.1.0
+          name: GoClaw Standard v0.1.0 (Windows x64)
