@@ -74,6 +74,11 @@ func main() {
 	runSilent(pg0Exe, "start", "--name", "goclaw-portable", "--data-dir", Config.Pg0DataDir, "--database", "goclaw")
 	waitForPort(Config.Pg0Host, Config.Pg0Port, Config.StartTimeout)
 
+	// Add pg0's bundled PostgreSQL bin dir to PATH (pg_dump, pg_restore, etc.)
+	if pg0Bin := findPg0BinDir(); pg0Bin != "" {
+		os.Setenv("PATH", pg0Bin+";"+os.Getenv("PATH"))
+	}
+
 	goclawExe := filepath.Join(root, "goclaw.exe")
 	goclawCmd := startSilent(goclawExe)
 	waitForURL(gatewayURL(Config.HealthPath), Config.StartTimeout)
@@ -197,6 +202,28 @@ func waitForPort(host string, port int, timeout time.Duration) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	log.Fatalf("Timed out waiting for %s", addr)
+}
+
+func findPg0BinDir() string {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return ""
+	}
+	installDir := filepath.Join(home, ".pg0", "installation")
+	entries, err := os.ReadDir(installDir)
+	if err != nil {
+		return ""
+	}
+	// Scan versioned dirs (e.g. "18.1.0") for bin/pg_dump.exe
+	for _, e := range entries {
+		if e.IsDir() {
+			bin := filepath.Join(installDir, e.Name(), "bin")
+			if info, err := os.Stat(filepath.Join(bin, "pg_dump.exe")); err == nil && !info.IsDir() {
+				return bin
+			}
+		}
+	}
+	return ""
 }
 
 func waitForURL(url string, timeout time.Duration) {
