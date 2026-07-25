@@ -117,10 +117,30 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 	w.Run()
 
 	log.Println("Shutting down...")
-	if goclawCmd != nil && goclawCmd.Process != nil {
-		goclawCmd.Process.Kill()
-	}
+	shutdownGoclaw(goclawCmd)
 	runSilent(pg0Exe, "stop", "--name", "goclaw-portable")
+}
+
+func shutdownGoclaw(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	pid := cmd.Process.Pid
+	log.Printf("Sending graceful shutdown to goclaw (PID %d)...", pid)
+	// taskkill without /F sends Ctrl+C which triggers Go's signal.Notify handler
+	exec.Command("taskkill", "/PID", fmt.Sprintf("%d", pid)).Run()
+	done := make(chan struct{})
+	go func() {
+		cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Println("goclaw exited gracefully")
+	case <-time.After(10 * time.Second):
+		log.Println("goclaw did not exit in time, force killing...")
+		cmd.Process.Kill()
+	}
 }
 
 func executableDir() string {
