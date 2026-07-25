@@ -92,7 +92,9 @@ jobs:
         id: pyver
         shell: bash
         run: |
-          echo "version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")" >> "$GITHUB_OUTPUT"
+          VER=$(python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Python version: $VER"
 
       - name: Cache pg0
         id: cache-pg0
@@ -128,8 +130,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p build
-          curl -sL -o build/python-embed.zip \
+          curl -fSL -o build/python-embed.zip \
             "https://www.python.org/ftp/python/${{ steps.pyver.outputs.version }}/python-${{ steps.pyver.outputs.version }}-embed-win64.zip"
+          test -s build/python-embed.zip || { echo "Downloaded file is empty"; exit 1; }
           unzip -o build/python-embed.zip -d build/python/
           rm build/python-embed.zip
 
