@@ -4,12 +4,13 @@ on:
   push:
     tags:
       - 'portable-v*'
+      - 'portable-latest'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag name (e.g. portable-v0.1.0)'
-        required: true
-        default: 'portable-v0.1.0'
+        description: 'Release tag (leave blank for auto build timestamp)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -81,14 +82,16 @@ jobs:
           curl -L -o build/pg0.exe \
             "https://github.com/vectorize-io/pg0/releases/download/${{ steps.pg0ver.outputs.version }}/pg0-windows-x86_64.exe"
 
-      - name: Determine tag name
+      - name: Determine release tag
         id: tag
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+            echo "tag=portable-build-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Download Python embeddable
