@@ -6,10 +6,6 @@ on:
       - 'standard-v*'
   workflow_dispatch:
 
-env:
-  POSTGRES_VERSION: "18.4-1"
-  PGVECTOR_TAG: "v0.8.2"
-
 jobs:
   bundle:
     runs-on: windows-latest
@@ -25,43 +21,21 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Enable Visual C++ Toolset
-        uses: ilammy/msvc-dev-cmd@v1
-
       - name: Build GoClaw
         run: make build
 
-      - name: Cache PostgreSQL
-        id: cache-postgres
-        uses: actions/cache@v4
-        with:
-          path: pg18-windows
-          key: pg${{ env.POSTGRES_VERSION }}-windows-x64
-
-      - name: Download PostgreSQL Windows binaries
-        if: steps.cache-postgres.outputs.cache-hit != 'true'
+      - name: Download pg0 Windows binary
         run: |
-          curl -L -o pg.zip "https://get.enterprisedb.com/postgresql/postgresql-${{ env.POSTGRES_VERSION }}-windows-x64-binaries.zip"
-          unzip -q pg.zip
-          mv pgsql pg18-windows
-          rm pg.zip
-
-      - name: Clone and build pgvector
-        shell: cmd
-        run: |
-          set "PGROOT=%GITHUB_WORKSPACE%\pg18-windows"
-          git clone --branch %PGVECTOR_TAG% https://github.com/pgvector/pgvector.git
-          cd pgvector
-          nmake /F Makefile.win
-          nmake /F Makefile.win install
+          curl -L -o pg0.exe "https://github.com/vectorize-io/pg0/releases/latest/download/pg0-windows-x86_64.exe"
 
       - name: Package bundle
         run: |
-          mkdir -p dist/goclaw-standard-windows-x64/pg
-          mkdir -p dist/goclaw-standard-windows-x64/migrations
+          mkdir -p dist/goclaw-standard-windows-x64
           cp goclaw.exe dist/goclaw-standard-windows-x64/
-          cp -r pg18-windows/* dist/goclaw-standard-windows-x64/pg/
+          cp pg0.exe dist/goclaw-standard-windows-x64/
+          mkdir -p dist/goclaw-standard-windows-x64/migrations
           cp -r migrations/* dist/goclaw-standard-windows-x64/migrations/
+          mkdir -p dist/goclaw-standard-windows-x64/scripts
           cp scripts/start-standard.ps1 dist/goclaw-standard-windows-x64/start.ps1
           Compress-Archive -Path dist/goclaw-standard-windows-x64/* -DestinationPath goclaw-standard-windows-x64.zip
 
