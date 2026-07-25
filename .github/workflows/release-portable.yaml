@@ -37,7 +37,7 @@ jobs:
 
       - name: Add webview dependency
         shell: bash
-        run: go get github.com/webview/webview@latest
+        run: go get github.com/webview/webview_go@latest
 
       - name: Build web UI
         shell: bash

@@ -12,51 +12,96 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/webview/webview"
+	webview "github.com/webview/webview_go"
 )
+
+var Config = struct {
+	Pg0Version   string
+	Pg0URL       string
+	GatewayHost  string
+	GatewayPort  int
+	Pg0Host      string
+	Pg0Port      int
+	WindowTitle  string
+	WindowWidth  int
+	WindowHeight int
+	Pg0DataDir   string
+	GoclawData   string
+	StartTimeout time.Duration
+	HealthPath   string
+}{
+	Pg0Version:   "v0.14.2",
+	GatewayHost:  "127.0.0.1",
+	GatewayPort:  18790,
+	Pg0Host:      "127.0.0.1",
+	Pg0Port:      5432,
+	WindowTitle:  "GoClaw Portable",
+	WindowWidth:  1280,
+	WindowHeight: 800,
+	StartTimeout: 60 * time.Second,
+	HealthPath:   "/health",
+}
+
+func init() {
+	Config.Pg0URL = fmt.Sprintf(
+		"https://github.com/vectorize-io/pg0/releases/download/%s/pg0-windows-x86_64.exe",
+		Config.Pg0Version,
+	)
+}
 
 func main() {
 	root := executableDir()
 	dataDir := filepath.Join(root, "data")
-	ensureDir(dataDir, "pg0")
-	ensureDir(dataDir, "goclaw")
+	Config.Pg0DataDir = filepath.Join(dataDir, "pg0")
+	Config.GoclawData = filepath.Join(dataDir, "goclaw")
+
+	mkdirAll(dataDir, "pg0")
+	mkdirAll(dataDir, "goclaw")
 
 	dotEnv := filepath.Join(root, ".env.local")
 	loadDotEnv(dotEnv)
-	saveDotEnv(dotEnv)
 
-	encKey := getEnvOrGenerate("GOCLAW_ENCRYPTION_KEY", 32)
-	gwToken := getEnvOrGenerate("GOCLAW_GATEWAY_TOKEN", 16)
+	if os.Getenv("GOCLAW_ENCRYPTION_KEY") == "" {
+		saveDotEnv(dotEnv, "GOCLAW_ENCRYPTION_KEY", generateKey(32))
+		saveDotEnv(dotEnv, "GOCLAW_GATEWAY_TOKEN", generateKey(16))
+		loadDotEnv(dotEnv)
+	}
 
-	os.Setenv("GOCLAW_POSTGRES_DSN", "postgres://postgres:postgres@127.0.0.1:5432/goclaw?sslmode=disable")
+	os.Setenv("GOCLAW_POSTGRES_DSN", pgDSN())
 	os.Setenv("GOCLAW_EDITION", "standard")
-	os.Setenv("GOCLAW_ENCRYPTION_KEY", encKey)
-	os.Setenv("GOCLAW_GATEWAY_TOKEN", gwToken)
 	os.Setenv("GOCLAW_AUTO_UPGRADE", "true")
 	os.Setenv("GOCLAW_DESKTOP", "1")
-	os.Setenv("GOCLAW_HOST", "127.0.0.1")
-	os.Setenv("GOCLAW_DATA_DIR", filepath.Join(dataDir, "goclaw"))
+	os.Setenv("GOCLAW_HOST", Config.GatewayHost)
+	os.Setenv("GOCLAW_DATA_DIR", Config.GoclawData)
 
-	pg0 := startProcess(filepath.Join(root, "pg0.exe"),
-		"start", "--data-dir", filepath.Join(dataDir, "pg0"), "--database", "goclaw")
-	waitForPort("127.0.0.1", 5432, 60*time.Second)
+	pg0Exe := filepath.Join(root, "pg0.exe")
+	os.Remove(filepath.Join(Config.Pg0DataDir, "postmaster.pid"))
 
-	goclaw := startProcess(filepath.Join(root, "goclaw.exe"))
-	waitForURL("http://127.0.0.1:18790/health", 60*time.Second)
+	log.Println("Booting pg0 database...")
+	runSilent(pg0Exe, "start", "--data-dir", Config.Pg0DataDir, "--database", "goclaw")
+	waitForPort(Config.Pg0Host, Config.Pg0Port, Config.StartTimeout)
+
+	goclawExe := filepath.Join(root, "goclaw.exe")
+	goclawCmd := startSilent(goclawExe)
+	waitForURL(gatewayURL(Config.HealthPath), Config.StartTimeout)
 
 	log.Println("GoClaw is ready — opening window...")
 
 	w := webview.New(false)
-	w.SetTitle("GoClaw Portable")
-	w.SetSize(1280, 800, webview.HintNone)
-	w.Navigate("http://127.0.0.1:18790")
+	defer w.Destroy()
+	w.SetTitle(Config.WindowTitle)
+	w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
+	w.Navigate(gatewayURL(""))
 	w.Run()
 
-	log.Println("Window closed, shutting down...")
-	goclaw.Process.Kill()
-	pg0.Process.Kill()
+	log.Println("Shutting down...")
+	if goclawCmd != nil && goclawCmd.Process != nil {
+		goclawCmd.Process.Kill()
+	}
+	runSilent(pg0Exe, "stop", "--data-dir", Config.Pg0DataDir)
 }
 
 func executableDir() string {
@@ -67,8 +112,42 @@ func executableDir() string {
 	return filepath.Dir(exe)
 }
 
-func ensureDir(parent, child string) {
+func mkdirAll(parent, child string) {
 	os.MkdirAll(filepath.Join(parent, child), 0755)
+}
+
+func pgDSN() string {
+	return fmt.Sprintf("postgres://postgres:postgres@%s:%d/goclaw?sslmode=disable",
+		Config.Pg0Host, Config.Pg0Port)
+}
+
+func gatewayURL(path string) string {
+	return fmt.Sprintf("http://%s:%d%s", Config.GatewayHost, Config.GatewayPort, path)
+}
+
+func runSilent(name string, args ...string) {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if err := cmd.Run(); err != nil {
+		log.Printf("%s completed with: %v", name, err)
+	}
+}
+
+func startSilent(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if err := cmd.Start(); err != nil {
+		log.Fatalf("Failed to start %s: %v", name, err)
+	}
+	return cmd
+}
+
+func generateKey(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func loadDotEnv(path string) {
@@ -84,95 +163,51 @@ func loadDotEnv(path string) {
 			continue
 		}
 		p := strings.SplitN(line, "=", 2)
-		if len(p) != 2 {
-			continue
-		}
-		k := strings.TrimSpace(p[0])
-		v := strings.TrimSpace(p[1])
-		if os.Getenv(k) == "" {
-			os.Setenv(k, v)
+		if len(p) == 2 {
+			k, v := strings.TrimSpace(p[0]), strings.TrimSpace(p[1])
+			if os.Getenv(k) == "" {
+				os.Setenv(k, v)
+			}
 		}
 	}
 }
 
-func saveDotEnv(path string) {
-	if _, err := os.Stat(path); err == nil {
+func saveDotEnv(path string, key, value string) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
 		return
 	}
-	content := fmt.Sprintf(`# GoClaw Portable — auto-generated config
-# Edit this file to customize settings.
-# Values here override defaults on next launch.
-
-GOCLAW_ENCRYPTION_KEY=%s
-GOCLAW_GATEWAY_TOKEN=%s
-GOCLAW_PORT=18790
-`, os.Getenv("GOCLAW_ENCRYPTION_KEY"), os.Getenv("GOCLAW_GATEWAY_TOKEN"))
-	os.WriteFile(path, []byte(content), 0644)
-}
-
-func getEnvOrGenerate(key string, n int) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	b := make([]byte, n)
-	rand.Read(b)
-	v := hex.EncodeToString(b)
-	os.Setenv(key, v)
-	return v
-}
-
-func startProcess(name string, args ...string) *exec.Cmd {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		log.Fatalf("Failed to start %s: %v", name, err)
-	}
-	log.Printf("Started %s (pid %d)", name, cmd.Process.Pid)
-	return cmd
+	defer f.Close()
+	fmt.Fprintf(f, "%s=%s\n", key, value)
 }
 
 func waitForPort(host string, port int, timeout time.Duration) {
 	addr := fmt.Sprintf("%s:%d", host, port)
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	tick := time.NewTicker(200 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case <-deadline.C:
-			log.Fatalf("Timed out waiting for %s", addr)
-		case <-tick.C:
-			c, err := net.DialTimeout("tcp", addr, time.Second)
-			if err == nil {
-				c.Close()
-				log.Printf("%s is ready", addr)
-				return
-			}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, time.Second)
+		if err == nil {
+			c.Close()
+			return
 		}
+		time.Sleep(200 * time.Millisecond)
 	}
+	log.Fatalf("Timed out waiting for %s", addr)
 }
 
 func waitForURL(url string, timeout time.Duration) {
 	client := &http.Client{Timeout: time.Second}
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	tick := time.NewTicker(500 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case <-deadline.C:
-			log.Fatalf("Timed out waiting for %s", url)
-		case <-tick.C:
-			resp, err := client.Get(url)
-			if err == nil && resp.StatusCode == http.StatusOK {
-				resp.Body.Close()
-				log.Printf("%s responded OK", url)
-				return
-			}
-			if resp != nil {
-				resp.Body.Close()
-			}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			return
 		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
+	log.Fatalf("Timed out waiting for %s", url)
 }
