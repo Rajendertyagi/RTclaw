@@ -5,6 +5,11 @@ on:
     tags:
       - 'standard-v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (e.g. standard-v0.1.0)'
+        required: true
+        default: 'standard-v0.1.0'
 
 jobs:
   bundle:
@@ -19,7 +24,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: 'latest'
 
       - name: Download Go modules
         run: go mod download
@@ -49,9 +54,19 @@ jobs:
         run: |
           Compress-Archive -Path dist/goclaw-standard-windows-x64/* -DestinationPath goclaw-standard-windows-x64.zip
 
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: goclaw-standard-windows-x64.zip
-          tag_name: ${{ github.ref_name }}
-          name: GoClaw Standard ${{ github.ref_name }} (Windows x64)
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: GoClaw Standard ${{ steps.tag.outputs.tag }} (Windows x64)
+          token: ${{ secrets.GITHUB_TOKEN }}
