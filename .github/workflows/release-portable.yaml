@@ -58,11 +58,20 @@ jobs:
           cd cmd/desktop-portable
           go build -ldflags="-s -w" -o ../../build/goclaw-portable.exe .
 
+      - name: Get latest pg0 version
+        id: pg0ver
+        shell: bash
+        run: |
+          TAG=$(curl -sL https://api.github.com/repos/vectorize-io/pg0/releases/latest | \
+            grep '"tag_name"' | cut -d'"' -f4)
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved pg0 latest: $TAG"
+
       - name: Download pg0 (embedded PostgreSQL)
         shell: bash
         run: |
           curl -L -o build/pg0.exe \
-            "https://github.com/vectorize-io/pg0/releases/download/v0.14.2/pg0-windows-x86_64.exe"
+            "https://github.com/vectorize-io/pg0/releases/download/${{ steps.pg0ver.outputs.version }}/pg0-windows-x86_64.exe"
 
       - name: Determine tag name
         id: tag

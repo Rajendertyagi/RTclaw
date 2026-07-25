@@ -19,8 +19,6 @@ import (
 )
 
 var Config = struct {
-	Pg0Version   string
-	Pg0URL       string
 	GatewayHost  string
 	GatewayPort  int
 	Pg0Host      string
@@ -33,7 +31,6 @@ var Config = struct {
 	StartTimeout time.Duration
 	HealthPath   string
 }{
-	Pg0Version:   "v0.14.2",
 	GatewayHost:  "127.0.0.1",
 	GatewayPort:  18790,
 	Pg0Host:      "127.0.0.1",
@@ -43,13 +40,6 @@ var Config = struct {
 	WindowHeight: 800,
 	StartTimeout: 60 * time.Second,
 	HealthPath:   "/health",
-}
-
-func init() {
-	Config.Pg0URL = fmt.Sprintf(
-		"https://github.com/vectorize-io/pg0/releases/download/%s/pg0-windows-x86_64.exe",
-		Config.Pg0Version,
-	)
 }
 
 func main() {
