@@ -78,15 +78,23 @@ const (
 )
 
 var (
-	goclawCmd             *exec.Cmd
-	pg0Exe                 string
-	w                      webview.WebView
-	quitting               atomic.Bool
-	user32                 = syscall.NewLazyDLL("user32.dll")
-	showWindow             = user32.NewProc("ShowWindow")
-	procGetWindowPlacement = user32.NewProc("GetWindowPlacement")
-	procSetWindowPlacement = user32.NewProc("SetWindowPlacement")
-	procMonitorFromRect    = user32.NewProc("MonitorFromRect")
+	goclawCmd                 *exec.Cmd
+	pg0Exe                     string
+	w                          webview.WebView
+	quitting                   atomic.Bool
+	user32                     = syscall.NewLazyDLL("user32.dll")
+	showWindow                 = user32.NewProc("ShowWindow")
+	procGetWindowPlacement     = user32.NewProc("GetWindowPlacement")
+	procSetWindowPlacement     = user32.NewProc("SetWindowPlacement")
+	procMonitorFromRect        = user32.NewProc("MonitorFromRect")
+	procCreateIconFromResource = user32.NewProc("CreateIconFromResourceEx")
+	procSendMessageW           = user32.NewProc("SendMessageW")
+)
+
+const (
+	WM_SETICON = 0x0080
+	ICON_SMALL = 0
+	ICON_BIG   = 1
 )
 
 func main() {
@@ -162,6 +170,7 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 	hwnd := w.Window()
 	if hwnd != nil {
 		loadWindowPlacement(uintptr(hwnd))
+		setAppIcon(uintptr(hwnd))
 	}
 
 	w.Run()
@@ -219,6 +228,24 @@ func showAppWindow() {
 }
 
 func iconData() []byte { return tbIconData }
+
+func setAppIcon(hwnd uintptr) {
+	data := iconData()
+	if len(data) == 0 {
+		return
+	}
+	hicon, _, _ := procCreateIconFromResource.Call(
+		uintptr(unsafe.Pointer(&data[0])),
+		uintptr(len(data)),
+		1,
+		0x00030000,
+		0, 0, 0,
+	)
+	if hicon != 0 {
+		procSendMessageW.Call(hwnd, WM_SETICON, ICON_BIG, hicon)
+		procSendMessageW.Call(hwnd, WM_SETICON, ICON_SMALL, hicon)
+	}
+}
 
 func shutdownGoclaw(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
