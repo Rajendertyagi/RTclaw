@@ -85,7 +85,7 @@ jobs:
       - name: Download Python embeddable
         shell: bash
         run: |
-          PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
+          PY_VER="3.12.4"
           curl -sL -o build/python-embed.zip \
             "https://www.python.org/ftp/python/$PY_VER/python-$PY_VER-embed-amd64.zip"
           unzip -o build/python-embed.zip -d build/python/
@@ -95,7 +95,7 @@ jobs:
         shell: bash
         run: |
           cd build/python
-          sed -i 's/^#import site/import site/' python._pth
+          sed -i 's/^#import site/import site/' python312._pth
           cp python.exe python3.exe
           curl -sL -o get-pip.py https://bootstrap.pypa.io/get-pip.py
           ./python3.exe get-pip.py --no-warn-script-location
