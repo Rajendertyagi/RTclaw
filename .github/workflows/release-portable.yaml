@@ -49,7 +49,7 @@ jobs:
         shell: bash
         run: |
           go get github.com/webview/webview_go@latest
-          go get github.com/getlantern/systray@latest
+          go get github.com/energye/systray@latest
           go get github.com/pkg/browser@latest
 
       - name: Build web UI

@@ -18,7 +18,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/getlantern/systray"
+	"github.com/energye/systray"
 	"github.com/pkg/browser"
 	webview "github.com/webview/webview_go"
 )
@@ -68,6 +68,7 @@ const (
 	SW_SHOWNORMAL     = 1
 	SW_SHOWMAXIMIZED  = 3
 	SW_SHOWMINIMIZED  = 2
+	SW_SHOWNA         = 8
 	WPF_SETMINPOSITION = 0x0001
 	MONITOR_DEFAULTTONULL = 0x00000000
 )
@@ -132,7 +133,7 @@ func main() {
 	waitForURL(gatewayURL(Config.HealthPath), Config.StartTimeout)
 
 	log.Println("GoClaw background services ready — starting system tray...")
-	systray.Register(onReady, nil)
+	systray.Register(onReady, onExit)
 
 	// Webview must be on the main thread; systray.Register sets up the tray
 	// without blocking, so the webview message loop pumps both windows.
@@ -160,12 +161,6 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 
 	w.Run()
 	w.Destroy()
-
-	log.Println("Shutting down core processes...")
-	shutdownGoclaw(goclawCmd)
-	if pg0Exe != "" {
-		runSilent(pg0Exe, "stop", "--name", "goclaw-portable")
-	}
 	os.Exit(0)
 }
 
@@ -173,6 +168,10 @@ func onReady() {
 	systray.SetIcon(iconData())
 	systray.SetTitle(Config.WindowTitle)
 	systray.SetTooltip(Config.WindowTitle)
+
+	systray.SetOnDClick(func() {
+		showAppWindow()
+	})
 
 	mShow := systray.AddMenuItem("Show Window", "Open the GoClaw desktop window")
 	mOpenWeb := systray.AddMenuItem("Open Web UI", "Open GoClaw in your default browser")
@@ -183,21 +182,12 @@ func onReady() {
 		for {
 			select {
 			case <-mShow.ClickedCh:
-				w.Dispatch(func() {
-					hwnd := w.Window()
-					if hwnd != nil {
-						showWindow.Call(uintptr(hwnd), 5)
-					}
-				})
+				showAppWindow()
 			case <-mOpenWeb.ClickedCh:
 				log.Printf("Opening browser at %s", gatewayURL(""))
 				browser.OpenURL(gatewayURL(""))
 			case <-mQuit.ClickedCh:
 				quitting.Store(true)
-				hwnd := w.Window()
-				if hwnd != nil {
-					saveWindowPlacement(uintptr(hwnd))
-				}
 				systray.Quit()
 				return
 			}
@@ -205,11 +195,23 @@ func onReady() {
 	}()
 }
 
+func onExit() {
+	log.Println("Shutting down core processes...")
+	hwnd := w.Window()
+	if hwnd != nil {
+		saveWindowPlacement(uintptr(hwnd))
+	}
+	shutdownGoclaw(goclawCmd)
+	if pg0Exe != "" {
+		runSilent(pg0Exe, "stop", "--name", "goclaw-portable")
+	}
+}
+
 func showAppWindow() {
 	w.Dispatch(func() {
 		hwnd := w.Window()
 		if hwnd != nil {
-			showWindow.Call(uintptr(hwnd), 5)
+			showWindow.Call(uintptr(hwnd), SW_SHOWNA)
 		}
 		w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
 	})
