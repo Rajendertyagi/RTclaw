@@ -11,6 +11,9 @@ on:
         required: true
         default: 'standard-v0.1.0'
 
+permissions:
+  contents: write
+
 jobs:
   bundle:
     runs-on: windows-latest
@@ -70,4 +73,3 @@ jobs:
           files: goclaw-standard-windows-x64.zip
           tag_name: ${{ steps.tag.outputs.tag }}
           name: GoClaw Standard ${{ steps.tag.outputs.tag }} (Windows x64)
-          token: ${{ secrets.GITHUB_TOKEN }}
