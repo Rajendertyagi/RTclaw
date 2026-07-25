@@ -6,9 +6,16 @@ on:
       - 'standard-v*'
   workflow_dispatch:
 
+env:
+  POSTGRES_VERSION: "18.4-1"
+  PGVECTOR_TAG: "v0.8.2"
+
 jobs:
   bundle:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - uses: actions/checkout@v4
@@ -18,28 +25,43 @@ jobs:
         with:
           go-version: '1.22'
 
+      - name: Enable Visual C++ Toolset
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Build GoClaw
         run: make build
 
-      - name: Download PG Windows binaries
-        run: |
-          curl -L -o pg17-windows.zip "https://get.enterprisedb.com/postgresql/postgresql-17.4-1-windows-x64-binaries.zip"
-          unzip -o pg17-windows.zip -d pg17-windows/
+      - name: Cache PostgreSQL
+        id: cache-postgres
+        uses: actions/cache@v4
+        with:
+          path: pg18-windows
+          key: pg${{ env.POSTGRES_VERSION }}-windows-x64
 
-      - name: Download pgvector Windows binary
+      - name: Download PostgreSQL Windows binaries
+        if: steps.cache-postgres.outputs.cache-hit != 'true'
         run: |
-          curl -L -o pgvector-windows.tar.gz "https://github.com/portalcorp/pgvector_compiled/releases/download/v0.7.0/pgvector-0.7.0-windows-x64.tar.gz"
-          mkdir -p pgvector
-          tar -xzf pgvector-windows.tar.gz -C pgvector/
+          curl -L -o pg.zip "https://get.enterprisedb.com/postgresql/postgresql-${{ env.POSTGRES_VERSION }}-windows-x64-binaries.zip"
+          unzip -q pg.zip
+          mv pgsql pg18-windows
+          rm pg.zip
+
+      - name: Clone and build pgvector
+        shell: cmd
+        run: |
+          set "PGROOT=%GITHUB_WORKSPACE%\pg18-windows"
+          git clone --branch %PGVECTOR_TAG% https://github.com/pgvector/pgvector.git
+          cd pgvector
+          nmake /F Makefile.win
+          nmake /F Makefile.win install
 
       - name: Package bundle
         run: |
-          mkdir -p dist/goclaw-standard-windows-x64
+          mkdir -p dist/goclaw-standard-windows-x64/pg
+          mkdir -p dist/goclaw-standard-windows-x64/migrations
           cp goclaw.exe dist/goclaw-standard-windows-x64/
-          cp -r pg17-windows/ dist/goclaw-standard-windows-x64/pg/
-          cp -r pgvector/ dist/goclaw-standard-windows-x64/pgvector/
-          cp -r migrations/ dist/goclaw-standard-windows-x64/migrations/ 2>/dev/null || true
-          mkdir -p dist/goclaw-standard-windows-x64/scripts
+          cp -r pg18-windows/* dist/goclaw-standard-windows-x64/pg/
+          cp -r migrations/* dist/goclaw-standard-windows-x64/migrations/
           cp scripts/start-standard.ps1 dist/goclaw-standard-windows-x64/start.ps1
           Compress-Archive -Path dist/goclaw-standard-windows-x64/* -DestinationPath goclaw-standard-windows-x64.zip
 
@@ -47,5 +69,5 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: goclaw-standard-windows-x64.zip
-          tag_name: standard-v0.1.0
-          name: GoClaw Standard v0.1.0 (Windows x64)
+          tag_name: ${{ github.ref_name }}
+          name: GoClaw Standard ${{ github.ref_name }} (Windows x64)
