@@ -71,7 +71,7 @@ func main() {
 	os.Remove(filepath.Join(Config.Pg0DataDir, "postmaster.pid"))
 
 	log.Println("Booting pg0 database...")
-	runSilent(pg0Exe, "start", "--data-dir", Config.Pg0DataDir, "--database", "goclaw")
+	runSilent(pg0Exe, "start", "--name", "goclaw-portable", "--data-dir", Config.Pg0DataDir, "--database", "goclaw")
 	waitForPort(Config.Pg0Host, Config.Pg0Port, Config.StartTimeout)
 
 	goclawExe := filepath.Join(root, "goclaw.exe")
@@ -91,7 +91,7 @@ func main() {
 	if goclawCmd != nil && goclawCmd.Process != nil {
 		goclawCmd.Process.Kill()
 	}
-	runSilent(pg0Exe, "stop", "--data-dir", Config.Pg0DataDir)
+	runSilent(pg0Exe, "stop", "--name", "goclaw-portable")
 }
 
 func executableDir() string {
