@@ -173,7 +173,7 @@ func onReady() {
 	systray.SetTitle(Config.WindowTitle)
 	systray.SetTooltip(Config.WindowTitle)
 
-	systray.SetOnDClick(func() {
+	systray.SetOnDClick(func(menu systray.IMenu) {
 		showAppWindow()
 	})
 
@@ -182,21 +182,17 @@ func onReady() {
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit GoClaw", "Shut down all background processes")
 
-	go func() {
-		for {
-			select {
-			case <-mShow.ClickedCh:
-				showAppWindow()
-			case <-mOpenWeb.ClickedCh:
-				log.Printf("Opening browser at %s", gatewayURL(""))
-				browser.OpenURL(gatewayURL(""))
-			case <-mQuit.ClickedCh:
-				quitting.Store(true)
-				systray.Quit()
-				return
-			}
-		}
-	}()
+	mShow.Click(func() {
+		showAppWindow()
+	})
+	mOpenWeb.Click(func() {
+		log.Printf("Opening browser at %s", gatewayURL(""))
+		browser.OpenURL(gatewayURL(""))
+	})
+	mQuit.Click(func() {
+		quitting.Store(true)
+		systray.Quit()
+	})
 }
 
 func onExit() {
