@@ -86,6 +86,10 @@ jobs:
             echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Copy migrations
+        shell: bash
+        run: cp -r migrations build/
+
       - name: Package portable zip
         shell: powershell
         run: |
