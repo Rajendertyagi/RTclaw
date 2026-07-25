@@ -67,21 +67,6 @@ jobs:
           cd cmd/desktop-portable
           go build -ldflags="-s -w" -o ../../build/goclaw-portable.exe .
 
-      - name: Get latest pg0 version
-        id: pg0ver
-        shell: bash
-        run: |
-          TAG=$(curl -sL https://api.github.com/repos/vectorize-io/pg0/releases/latest | \
-            grep '"tag_name"' | cut -d'"' -f4)
-          echo "version=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Resolved pg0 latest: $TAG"
-
-      - name: Download pg0 (embedded PostgreSQL)
-        shell: bash
-        run: |
-          curl -L -o build/pg0.exe \
-            "https://github.com/vectorize-io/pg0/releases/download/${{ steps.pg0ver.outputs.version }}/pg0-windows-x86_64.exe"
-
       - name: Determine release tag
         id: tag
         shell: bash
@@ -94,32 +79,76 @@ jobs:
             echo "tag=portable-build-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Download Python embeddable
+      - name: Get latest pg0 version
+        id: pg0ver
         shell: bash
         run: |
-          PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
+          TAG=$(curl -sL https://api.github.com/repos/vectorize-io/pg0/releases/latest | \
+            grep '"tag_name"' | cut -d'"' -f4)
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved pg0 latest: $TAG"
+
+      - name: Get Python version
+        id: pyver
+        shell: bash
+        run: |
+          echo "version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pg0
+        id: cache-pg0
+        uses: actions/cache@v4
+        with:
+          path: build/pg0.exe
+          key: pg0-${{ steps.pg0ver.outputs.version }}
+
+      - name: Cache Python embeddable (post-setup)
+        id: cache-python
+        uses: actions/cache@v4
+        with:
+          path: build/python
+          key: python-embed-${{ steps.pyver.outputs.version }}
+
+      - name: Cache uv
+        id: cache-uv
+        uses: actions/cache@v4
+        with:
+          path: build/uv.exe
+          key: uv-latest
+
+      - name: Download pg0
+        if: steps.cache-pg0.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p build
+          curl -L -o build/pg0.exe \
+            "https://github.com/vectorize-io/pg0/releases/download/${{ steps.pg0ver.outputs.version }}/pg0-windows-x86_64.exe"
+
+      - name: Download Python embeddable
+        if: steps.cache-python.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p build
           curl -sL -o build/python-embed.zip \
-            "https://www.python.org/ftp/python/$PY_VER/python-$PY_VER-embed-win64.zip"
+            "https://www.python.org/ftp/python/${{ steps.pyver.outputs.version }}/python-${{ steps.pyver.outputs.version }}-embed-win64.zip"
           unzip -o build/python-embed.zip -d build/python/
           rm build/python-embed.zip
 
       - name: Setup Python embeddable (site + pip3 + python3 alias)
+        if: steps.cache-python.outputs.cache-hit != 'true'
         shell: bash
         run: |
           cd build/python
-          # Enable site-packages so pip can install packages
           sed -i 's/^#import site/import site/' python._pth
-          # Create python3.exe alias (GoClaw looks for "python3")
           cp python.exe python3.exe
-          # Bootstrap pip into the embeddable
           curl -sL -o get-pip.py https://bootstrap.pypa.io/get-pip.py
           ./python3.exe get-pip.py --no-warn-script-location
           rm get-pip.py
-          # pip3.exe is now in build/python/Scripts/
 
       - name: Download uv
+        if: steps.cache-uv.outputs.cache-hit != 'true'
         shell: bash
         run: |
+          mkdir -p build
           curl -sL -o build/uv.zip \
             https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip
           unzip -o build/uv.zip -d build/uv-tmp
