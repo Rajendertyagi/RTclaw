@@ -1,0 +1,87 @@
+name: Release Portable Desktop
+
+on:
+  push:
+    tags:
+      - 'portable-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (e.g. portable-v0.1.0)'
+        required: true
+        default: 'portable-v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install MinGW (for CGo / webview2)
+        shell: bash
+        run: choco install mingw -y --no-progress
+
+      - name: Add webview dependency
+        shell: bash
+        run: go get github.com/webview/webview@latest
+
+      - name: Build web UI
+        shell: bash
+        run: |
+          corepack enable && corepack prepare pnpm@10.28.2 --activate
+          cd ui/web && pnpm install --frozen-lockfile && pnpm build && cd ../..
+          mkdir -p internal/webui/dist
+          cp -r ui/web/dist/* internal/webui/dist/
+
+      - name: Build GoClaw Standard server (with embedded web UI)
+        shell: bash
+        run: |
+          go build -tags embedui -ldflags="-s -w" -o build/goclaw.exe .
+
+      - name: Build portable wrapper
+        shell: bash
+        run: |
+          cd cmd/desktop-portable
+          go build -ldflags="-s -w" -o ../../build/goclaw-portable.exe .
+
+      - name: Download pg0 (embedded PostgreSQL)
+        shell: bash
+        run: |
+          curl -L -o build/pg0.exe \
+            "https://github.com/vectorize-io/pg0/releases/download/v0.14.2/pg0-windows-x86_64.exe"
+
+      - name: Determine tag name
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Package portable zip
+        shell: powershell
+        run: |
+          Compress-Archive -Path build\* -DestinationPath goclaw-portable-windows-amd64.zip
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v3
+        with:
+          files: goclaw-portable-windows-amd64.zip
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: GoClaw Portable ${{ steps.tag.outputs.tag }} (Windows x64)
