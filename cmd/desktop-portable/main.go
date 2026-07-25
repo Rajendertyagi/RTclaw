@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -46,13 +47,41 @@ var Config = struct {
 	HealthPath:   "/health",
 }
 
+type POINT struct {
+	X, Y int32
+}
+
+type RECT struct {
+	Left, Top, Right, Bottom int32
+}
+
+type WindowPlacement struct {
+	Length           uint32
+	Flags            uint32
+	ShowCmd          uint32
+	PtMinPosition    POINT
+	PtMaxPosition    POINT
+	RcNormalPosition RECT
+}
+
+const (
+	SW_SHOWNORMAL     = 1
+	SW_SHOWMAXIMIZED  = 3
+	SW_SHOWMINIMIZED  = 2
+	WPF_SETMINPOSITION = 0x0001
+	MONITOR_DEFAULTTONULL = 0x00000000
+)
+
 var (
-	goclawCmd    *exec.Cmd
-	pg0Exe       string
-	w            webview.WebView
-	isWindowOpen bool
-	user32       = syscall.NewLazyDLL("user32.dll")
-	showWindow   = user32.NewProc("ShowWindow")
+	goclawCmd             *exec.Cmd
+	pg0Exe                 string
+	w                      webview.WebView
+	isWindowOpen           bool
+	user32                 = syscall.NewLazyDLL("user32.dll")
+	showWindow             = user32.NewProc("ShowWindow")
+	procGetWindowPlacement = user32.NewProc("GetWindowPlacement")
+	procSetWindowPlacement = user32.NewProc("SetWindowPlacement")
+	procMonitorFromRect    = user32.NewProc("MonitorFromRect")
 )
 
 func main() {
@@ -155,6 +184,12 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 	w.SetTitle(Config.WindowTitle)
 	w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
 	w.Navigate(gatewayURL(""))
+
+	hwnd := w.Window()
+	if hwnd != nil {
+		loadWindowPlacement(uintptr(hwnd))
+	}
+
 	isWindowOpen = true
 	w.Run()
 	isWindowOpen = false
@@ -194,6 +229,7 @@ func onExit() {
 			hwnd := w.Window()
 			if hwnd != nil {
 				showWindow.Call(uintptr(hwnd), 0)
+				saveWindowPlacement(uintptr(hwnd))
 			}
 		})
 		w.Destroy()
@@ -388,4 +424,56 @@ func waitForURL(url string, timeout time.Duration) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	log.Fatalf("Timed out waiting for %s", url)
+}
+
+func windowPlacementPath() string {
+	return filepath.Join(executableDir(), "data", "window-state.json")
+}
+
+func loadWindowPlacement(hwnd uintptr) {
+	if hwnd == 0 {
+		return
+	}
+	data, err := os.ReadFile(windowPlacementPath())
+	if err != nil {
+		return
+	}
+	var wp WindowPlacement
+	if err := json.Unmarshal(data, &wp); err != nil {
+		return
+	}
+	wp.Length = uint32(unsafe.Sizeof(wp))
+
+	mon, _, _ := procMonitorFromRect.Call(
+		uintptr(unsafe.Pointer(&wp.RcNormalPosition)),
+		MONITOR_DEFAULTTONULL,
+	)
+	if mon == 0 {
+		log.Println("Saved window position is off-screen. Falling back to defaults.")
+		return
+	}
+
+	if wp.ShowCmd == SW_SHOWMINIMIZED {
+		wp.Flags |= WPF_SETMINPOSITION
+		wp.ShowCmd = SW_SHOWNORMAL
+	}
+
+	_, _, _ = procSetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp)))
+}
+
+func saveWindowPlacement(hwnd uintptr) {
+	if hwnd == 0 {
+		return
+	}
+	var wp WindowPlacement
+	wp.Length = uint32(unsafe.Sizeof(wp))
+
+	ret, _, _ := procGetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp)))
+	if ret != 0 {
+		data, err := json.MarshalIndent(wp, "", "  ")
+		if err == nil {
+			_ = os.MkdirAll(filepath.Join(executableDir(), "data"), 0755)
+			_ = os.WriteFile(windowPlacementPath(), data, 0644)
+		}
+	}
 }
