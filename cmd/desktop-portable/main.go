@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,9 +12,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -29,8 +31,6 @@ var tbIconData []byte
 var Config = struct {
 	GatewayHost  string
 	GatewayPort  int
-	Pg0Host      string
-	Pg0Port      int
 	WindowTitle  string
 	WindowWidth  int
 	WindowHeight int
@@ -41,8 +41,6 @@ var Config = struct {
 }{
 	GatewayHost:  "127.0.0.1",
 	GatewayPort:  18790,
-	Pg0Host:      "127.0.0.1",
-	Pg0Port:      5432,
 	WindowTitle:  "GoClaw Portable",
 	WindowWidth:  1280,
 	WindowHeight: 800,
@@ -80,7 +78,9 @@ var (
 	goclawCmd                 *exec.Cmd
 	pgMgr                      *PGManager
 	w                          webview.WebView
-	quitting                   atomic.Bool
+	globalCtx                  context.Context
+	appCancel                  context.CancelFunc
+	teardownOnce               sync.Once
 	user32                     = syscall.NewLazyDLL("user32.dll")
 	showWindow                 = user32.NewProc("ShowWindow")
 	procGetWindowPlacement     = user32.NewProc("GetWindowPlacement")
@@ -97,6 +97,10 @@ const (
 )
 
 func main() {
+	// Unified lifecycle: Ctrl+C, SIGTERM, or normal exit all converge to one path.
+	globalCtx, appCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer appCancel()
+
 	root := executableDir()
 	dataDir := filepath.Join(root, "data")
 	Config.Pg0DataDir = filepath.Join(dataDir, "pg0")
@@ -115,7 +119,7 @@ func main() {
 	}
 
 	os.Setenv("GOCLAW_CONFIG", filepath.Join(root, "config.json"))
-	os.Setenv("GOCLAW_POSTGRES_DSN", pgDSN())
+	os.Setenv("GOCLAW_POSTGRES_DSN", buildPgDSN("goclaw"))
 	os.Setenv("GOCLAW_EDITION", "standard")
 	os.Setenv("GOCLAW_AUTO_UPGRADE", "true")
 	os.Setenv("GOCLAW_DESKTOP", "1")
@@ -156,7 +160,6 @@ func main() {
 	// Webview runs on the main thread; systray pumps Win32 events independently.
 	token := os.Getenv("GOCLAW_GATEWAY_TOKEN")
 	w = webview.New(false)
-	defer w.Destroy()
 	if token != "" {
 		initJS := fmt.Sprintf(`(function(){
 var k="goclaw:auth";
@@ -178,7 +181,17 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 		setAppIcon(uintptr(hwnd))
 	}
 
+	// Signal watcher: Ctrl+C / SIGTERM closes the webview, triggers teardown.
+	go func() {
+		<-globalCtx.Done()
+		log.Println("Shutdown signal received (Ctrl+C / SIGTERM). Closing webview...")
+		w.Terminate()
+	}()
+
 	w.Run()
+
+	// Single teardown path for all exit routes (user close, Quit menu, OS signal).
+	executeGlobalTeardown()
 }
 
 func onReady() {
@@ -203,22 +216,49 @@ func onReady() {
 		browser.OpenURL(gatewayURL(""))
 	})
 	mQuit.Click(func() {
-		quitting.Store(true)
 		systray.Quit()
 		w.Terminate()
 	})
 }
 
 func onExit() {
-	log.Println("Shutting down core processes...")
-	hwnd := w.Window()
-	if hwnd != nil {
-		saveWindowPlacement(uintptr(hwnd))
-	}
-	shutdownGoclaw(goclawCmd)
-	if pgMgr != nil {
-		pgMgr.Close()
-	}
+	log.Println("Exit triggered from system tray context menu.")
+	executeGlobalTeardown()
+}
+
+// executeGlobalTeardown unifies all exit paths into one ordered sequence.
+// It is guaranteed to run exactly once via teardownOnce.
+func executeGlobalTeardown() {
+	teardownOnce.Do(func() {
+		log.Println("Executing synchronized global cleanup...")
+
+		// Cancel the global context to signal any background watchers.
+		if appCancel != nil {
+			appCancel()
+		}
+
+		// Persist window placement before teardown.
+		hwnd := w.Window()
+		if hwnd != nil {
+			saveWindowPlacement(uintptr(hwnd))
+		}
+
+		// Gracefully stop the goclaw backend process.
+		shutdownGoclaw(goclawCmd)
+
+		// Close database — cancels m.ctx, health loop exits, PG stops.
+		if pgMgr != nil {
+			pgMgr.Close()
+		}
+
+		// Free the webview resource after Terminate has been called.
+		w.Destroy()
+
+		// Remove systray icon.
+		systray.Quit()
+
+		log.Println("All portable services closed cleanly.")
+	})
 }
 
 func showAppWindow() {
@@ -282,11 +322,6 @@ func executableDir() string {
 
 func mkdirAll(parent, child string) {
 	os.MkdirAll(filepath.Join(parent, child), 0755)
-}
-
-func pgDSN() string {
-	return fmt.Sprintf("postgres://postgres:postgres@%s:%d/goclaw?sslmode=disable",
-		Config.Pg0Host, Config.Pg0Port)
 }
 
 func gatewayURL(path string) string {

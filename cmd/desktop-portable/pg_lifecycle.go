@@ -90,16 +90,9 @@ func buildPgDSN(dbName string) string {
 	if pass == "" {
 		pass = "postgres"
 	}
-	host := Config.Pg0Host
-	port := Config.Pg0Port
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	if port == 0 {
-		port = 5432
-	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		user, pass, host, port, dbName)
+	// Portable always connects to the locally-managed pg0 instance.
+	return fmt.Sprintf("postgres://%s:%s@127.0.0.1:5432/%s?sslmode=disable",
+		user, pass, dbName)
 }
 
 // Stop shuts down the PostgreSQL process gracefully, then force-kills if hung.
