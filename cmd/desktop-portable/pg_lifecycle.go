@@ -89,8 +89,20 @@ func (m *PGManager) Start(dbName string) error {
 	dsn := buildPgDSN(dbName)
 	db, err := m.waitForDB(dsn, 30*time.Second)
 	if err != nil {
-		if m.pg0Cmd.Process != nil {
-			m.pg0Cmd.Process.Kill()
+		m.mu.Lock()
+		if m.cancel != nil {
+			m.cancel()
+		}
+		m.isAlive = false
+		cmd := m.pg0Cmd
+		done := m.exitDone
+		m.mu.Unlock()
+
+		if cmd != nil && cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		if done != nil {
+			<-done
 		}
 		return err
 	}
@@ -107,7 +119,15 @@ func buildPgDSN(dbName string) string {
 	if pass == "" {
 		pass = "postgres"
 	}
-	return fmt.Sprintf("postgres://%s:%s@127.0.0.1:5432/%s?sslmode=disable", user, pass, dbName)
+	host := Config.Pg0Host
+	port := Config.Pg0Port
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if port == 0 {
+		port = 5432
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", user, pass, host, port, dbName)
 }
 
 func (m *PGManager) Stop() {
