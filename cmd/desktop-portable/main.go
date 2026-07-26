@@ -132,13 +132,13 @@ func main() {
 	}
 
 	if pg0Bin := findPg0BinDir(); pg0Bin != "" {
-		os.Setenv("PATH", pg0Bin+";"+os.Getenv("PATH"))
+		os.Setenv("PATH", pg0Bin+string(filepath.ListSeparator)+os.Getenv("PATH"))
 	}
 	if pythonDir := findPythonDir(root); pythonDir != "" {
-		os.Setenv("PATH", pythonDir+";"+os.Getenv("PATH"))
+		os.Setenv("PATH", pythonDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
 	}
 	if uvDir := findUvDir(root); uvDir != "" {
-		os.Setenv("PATH", uvDir+";"+os.Getenv("PATH"))
+		os.Setenv("PATH", uvDir+string(filepath.ListSeparator)+os.Getenv("PATH"))
 	}
 
 	// Monitor pg0 health in background — restart if it dies
@@ -148,11 +148,10 @@ func main() {
 	goclawCmd = startSilent(goclawExe)
 	waitForURL(gatewayURL(Config.HealthPath), Config.StartTimeout)
 
-	log.Println("GoClaw background services ready — starting system tray...")
-	systray.Register(onReady, onExit)
+	log.Println("GoClaw background services ready — starting system tray on dedicated goroutine...")
+	go systray.Register(onReady, onExit)
 
-	// Webview must be on the main thread; systray.Register sets up the tray
-	// without blocking, so the webview message loop pumps both windows.
+	// Webview runs on the main thread; systray pumps Win32 events independently.
 	token := os.Getenv("GOCLAW_GATEWAY_TOKEN")
 	w = webview.New(false)
 	if token != "" {
@@ -178,6 +177,7 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 
 	w.Run()
 	w.Destroy()
+	systray.Quit()
 	os.Exit(0)
 }
 
@@ -379,7 +379,7 @@ func findPythonDir(root string) string {
 	if info, err := os.Stat(filepath.Join(pyDir, "python.exe")); err == nil && !info.IsDir() {
 		scriptsDir := filepath.Join(pyDir, "Scripts")
 		if info, err := os.Stat(filepath.Join(scriptsDir, "pip.exe")); err == nil && !info.IsDir() {
-			return pyDir + ";" + scriptsDir
+			return pyDir + string(filepath.ListSeparator) + scriptsDir
 		}
 		return pyDir
 	}
