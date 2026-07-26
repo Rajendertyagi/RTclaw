@@ -128,8 +128,15 @@ func main() {
 	os.Remove(filepath.Join(Config.Pg0DataDir, "postmaster.pid"))
 
 	log.Println("Booting pg0 database...")
-	runSilent(pg0Exe, "start", "--name", "goclaw-portable", "--data-dir", Config.Pg0DataDir, "--database", "goclaw")
+	if err := startPg0(pg0Exe, Config.Pg0DataDir); err != nil {
+		log.Fatalf("pg0: %v", err)
+	}
 	waitForPort(Config.Pg0Host, Config.Pg0Port, Config.StartTimeout)
+
+	// Verify pg0 is alive after start
+	if !pg0IsAlive(pg0Exe) {
+		log.Fatalf("pg0 failed to start or crashed immediately")
+	}
 
 	if pg0Bin := findPg0BinDir(); pg0Bin != "" {
 		os.Setenv("PATH", pg0Bin+";"+os.Getenv("PATH"))
@@ -140,6 +147,9 @@ func main() {
 	if uvDir := findUvDir(root); uvDir != "" {
 		os.Setenv("PATH", uvDir+";"+os.Getenv("PATH"))
 	}
+
+	// Monitor pg0 health in background — restart if it dies
+	go monitorPg0(pg0Exe, Config.Pg0DataDir)
 
 	goclawExe := filepath.Join(root, "goclaw.exe")
 	goclawCmd = startSilent(goclawExe)
@@ -213,7 +223,13 @@ func onExit() {
 	}
 	shutdownGoclaw(goclawCmd)
 	if pg0Exe != "" {
-		runSilent(pg0Exe, "stop", "--name", "goclaw-portable")
+		cmd := exec.Command(pg0Exe, "stop", "--name", "goclaw-portable")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("pg0 stop: %v\n%s", err, string(out))
+		} else {
+			log.Printf("pg0 stopped")
+		}
 	}
 }
 
@@ -265,6 +281,63 @@ func shutdownGoclaw(cmd *exec.Cmd) {
 	case <-time.After(10 * time.Second):
 		log.Println("goclaw did not exit in time, force killing...")
 		cmd.Process.Kill()
+	}
+}
+
+func startPg0(exe, dataDir string) error {
+	cmd := exec.Command(exe, "start", "--name", "goclaw-portable", "--data-dir", dataDir, "--database", "goclaw")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("pg0: stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("pg0: start: %w", err)
+	}
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			log.Printf("pg0: %s", scanner.Text())
+		}
+	}()
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("pg0: start failed: %w", err)
+	}
+	return nil
+}
+
+func pg0IsAlive(exe string) bool {
+	cmd := exec.Command(exe, "info", "--name", "goclaw-portable")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("pg0 health check failed: %v\n%s", err, string(out))
+		return false
+	}
+	return strings.Contains(string(out), "is running")
+}
+
+func monitorPg0(exe, dataDir string) {
+	for {
+		time.Sleep(30 * time.Second)
+		if quitting.Load() {
+			return
+		}
+		if pg0IsAlive(exe) {
+			continue
+		}
+		log.Println("pg0 is down — restarting...")
+		os.Remove(filepath.Join(dataDir, "postmaster.pid"))
+		if err := startPg0(exe, dataDir); err != nil {
+			log.Printf("pg0 restart failed: %v", err)
+			continue
+		}
+		waitForPort(Config.Pg0Host, Config.Pg0Port, 30*time.Second)
+		if !pg0IsAlive(exe) {
+			log.Printf("pg0 restart failed — will retry in 30s")
+		} else {
+			log.Println("pg0 restarted successfully")
+		}
 	}
 }
 
