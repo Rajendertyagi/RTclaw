@@ -73,6 +73,10 @@ func (m *PGManager) Start(dbName string) error {
 	if err != nil {
 		log.Printf("Database server failed to respond post-launch: %v", err)
 		m.Stop()
+		// Re-create context so HealthCheckLoop doesn't see a cancelled ctx and exit
+		m.mu.Lock()
+		m.ctx, m.cancel = context.WithCancel(context.Background())
+		m.mu.Unlock()
 		return err
 	}
 
