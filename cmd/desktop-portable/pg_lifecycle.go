@@ -207,6 +207,10 @@ func (m *PGManager) HealthCheckLoop() {
 	defer ticker.Stop()
 
 	for {
+		m.mu.Lock()
+		ctx := m.ctx
+		m.mu.Unlock()
+
 		select {
 		case <-ticker.C:
 			if !m.Aliveness() && !m.IsProcessRunning() {
@@ -221,7 +225,7 @@ func (m *PGManager) HealthCheckLoop() {
 					log.Printf("pg0 recovery failed: %v", err)
 				}
 			}
-		case <-m.ctx.Done():
+		case <-ctx.Done():
 			log.Println("pg0 health check loop exiting due to cancellation")
 			return
 		}
