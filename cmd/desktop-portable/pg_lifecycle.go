@@ -21,13 +21,14 @@ import (
 
 // PGManager manages the pg0 PostgreSQL process lifecycle.
 type PGManager struct {
-	pg0Path string
-	pidFile string
-	dbName  string
-	db      *sql.DB
-	mu      sync.Mutex
-	ctx     context.Context
-	cancel  context.CancelFunc
+	pg0Path   string
+	pidFile   string
+	dbName    string
+	db        *sql.DB
+	mu        sync.Mutex
+	restartMu sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 func NewPGManager(pg0Path, dataDir string) *PGManager {
@@ -144,6 +145,17 @@ func (m *PGManager) Close() {
 	}
 	m.mu.Unlock()
 	m.Stop()
+}
+
+// Restart stops and re-starts the database.
+// Uses a dedicated restartMu so concurrent clicks serialize safely without
+// deadlocking against the internal mu held by Stop() and Start().
+func (m *PGManager) Restart(name string) error {
+	m.restartMu.Lock()
+	defer m.restartMu.Unlock()
+
+	m.Stop()
+	return m.Start(name)
 }
 
 // DB returns a mutex-safe reference to the *sql.DB handle.

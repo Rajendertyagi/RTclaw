@@ -70,6 +70,7 @@ const (
 	SW_SHOWMAXIMIZED  = 3
 	SW_SHOWMINIMIZED  = 2
 	SW_SHOWNA         = 8
+	SW_HIDE           = 0
 	WPF_SETMINPOSITION = 0x0001
 	MONITOR_DEFAULTTONULL = 0x00000000
 )
@@ -81,6 +82,10 @@ var (
 	globalCtx                  context.Context
 	appCancel                  context.CancelFunc
 	teardownOnce               sync.Once
+	oldWndProc                 uintptr
+	kernel32                   = syscall.NewLazyDLL("kernel32.dll")
+	procCreateMutex            = kernel32.NewProc("CreateMutexW")
+	procGetLastError           = kernel32.NewProc("GetLastError")
 	user32                     = syscall.NewLazyDLL("user32.dll")
 	showWindow                 = user32.NewProc("ShowWindow")
 	procGetWindowPlacement     = user32.NewProc("GetWindowPlacement")
@@ -88,15 +93,43 @@ var (
 	procMonitorFromRect        = user32.NewProc("MonitorFromRect")
 	procCreateIconFromResource = user32.NewProc("CreateIconFromResourceEx")
 	procSendMessageW           = user32.NewProc("SendMessageW")
+	procSetWindowLongPtr       = user32.NewProc("SetWindowLongPtrW")
+	procCallWindowProc         = user32.NewProc("CallWindowProcW")
 )
 
 const (
 	WM_SETICON = 0x0080
+	WM_CLOSE   = 0x0010
 	ICON_SMALL = 0
 	ICON_BIG   = 1
 )
 
+// Custom window procedure intercepts WM_CLOSE to hide-to-tray instead of closing.
+func wndProc(hwnd uintptr, msg uint32, wparam, lparam uintptr) uintptr {
+	if msg == WM_CLOSE {
+		showWindow.Call(hwnd, SW_HIDE)
+		systray.ShowMessage("GoClaw", "Window minimized to tray")
+		return 0
+	}
+	ret, _, _ := procCallWindowProc.Call(oldWndProc, uintptr(hwnd), uintptr(msg), wparam, lparam)
+	return ret
+}
+
+func ensureSingleInstance(name string) bool {
+	h, _, _ := procCreateMutex.Call(0, 1, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(name))))
+	lastErr, _, _ := procGetLastError.Call()
+	if lastErr == 183 { // ERROR_ALREADY_EXISTS
+		return false
+	}
+	return true
+}
+
 func main() {
+	if !ensureSingleInstance("GoClawPortableMutex") {
+		log.Println("Another instance is already running.")
+		return
+	}
+
 	// Unified lifecycle: Ctrl+C, SIGTERM, or normal exit all converge to one path.
 	globalCtx, appCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer appCancel()
@@ -160,7 +193,6 @@ func main() {
 	// Webview runs on the main thread; systray pumps Win32 events independently.
 	token := os.Getenv("GOCLAW_GATEWAY_TOKEN")
 	w = webview.New(false)
-	defer w.Destroy()
 	if token != "" {
 		initJS := fmt.Sprintf(`(function(){
 var k="goclaw:auth";
@@ -178,8 +210,13 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 
 	hwnd := w.Window()
 	if hwnd != nil {
-		loadWindowPlacement(uintptr(hwnd))
 		setAppIcon(uintptr(hwnd))
+		loadWindowPlacement(uintptr(hwnd))
+		oldWndProc, _, _ = procSetWindowLongPtr.Call(
+			uintptr(hwnd),
+			-4, // GWL_WNDPROC
+			syscall.NewCallback(wndProc),
+		)
 	}
 
 	// Signal watcher: Ctrl+C / SIGTERM closes the webview, triggers teardown.
@@ -200,30 +237,38 @@ func onReady() {
 	systray.SetTitle(Config.WindowTitle)
 	systray.SetTooltip(Config.WindowTitle)
 
+	// Double‑click restores window properly
 	systray.SetOnDClick(func(menu systray.IMenu) {
-		showAppWindow()
-	})
-	systray.SetOnRClick(func(menu systray.IMenu) {
-		if err := menu.ShowMenu(); err != nil {
-			log.Printf("Failed to show systray menu: %v", err)
-		}
+		showAppWindow(true)
 	})
 
 	mShow := systray.AddMenuItem("Show Window", "Open the GoClaw desktop window")
 	mOpenWeb := systray.AddMenuItem("Open Web UI", "Open GoClaw in your default browser")
+	mRestart := systray.AddMenuItem("Restart DB", "Restart pg0 database")
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit GoClaw", "Shut down all background processes")
 
 	mShow.Click(func() {
-		showAppWindow()
+		showAppWindow(true)
+		systray.ShowMessage("GoClaw", "Window restored")
 	})
 	mOpenWeb.Click(func() {
 		log.Printf("Opening browser at %s", gatewayURL(""))
 		browser.OpenURL(gatewayURL(""))
+		systray.ShowMessage("GoClaw", "Web UI opened in browser")
+	})
+	mRestart.Click(func() {
+		go func() {
+			if err := pgMgr.Restart("goclaw"); err != nil {
+				log.Printf("Failed to restart pg0: %v", err)
+				systray.ShowMessage("GoClaw", "DB restart failed")
+			} else {
+				systray.ShowMessage("GoClaw", "Database restarted successfully")
+			}
+		}()
 	})
 	mQuit.Click(func() {
-		systray.Quit()
-		w.Terminate()
+		w.Terminate() // teardown handles systray.Quit
 	})
 }
 
@@ -238,37 +283,41 @@ func executeGlobalTeardown() {
 	teardownOnce.Do(func() {
 		log.Println("Executing synchronized global cleanup...")
 
-		// Cancel the global context to signal any background watchers.
 		if appCancel != nil {
 			appCancel()
 		}
 
-		// Persist window placement before teardown.
 		hwnd := w.Window()
 		if hwnd != nil {
 			saveWindowPlacement(uintptr(hwnd))
 		}
 
-		// Gracefully stop the goclaw backend process.
 		shutdownGoclaw(goclawCmd)
 
-		// Close database — cancels m.ctx, health loop exits, PG stops.
 		if pgMgr != nil {
 			pgMgr.Close()
 		}
 
-		// Remove systray icon.
+		w.Destroy()
+
+		// Remove systray icon only once
 		systray.Quit()
 
 		log.Println("All portable services closed cleanly.")
 	})
 }
 
-func showAppWindow() {
+func showAppWindow(forceNormal bool) {
 	w.Dispatch(func() {
 		hwnd := w.Window()
 		if hwnd != nil {
-			showWindow.Call(uintptr(hwnd), SW_SHOWNA)
+			if forceNormal {
+				// Restore to normal if minimized
+				showWindow.Call(uintptr(hwnd), SW_SHOWNORMAL)
+			} else {
+				// Bring to front without changing state
+				showWindow.Call(uintptr(hwnd), SW_SHOWNA)
+			}
 		}
 		w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
 	})
@@ -300,12 +349,18 @@ func shutdownGoclaw(cmd *exec.Cmd) {
 	}
 	pid := cmd.Process.Pid
 	log.Printf("Sending graceful shutdown to goclaw (PID %d)...", pid)
-	exec.Command("taskkill", "/PID", fmt.Sprintf("%d", pid)).Run()
+
+	// Try HTTP shutdown endpoint first
+	shutdownURL := gatewayURL("/shutdown")
+	client := &http.Client{Timeout: 2 * time.Second}
+	_, _ = client.Get(shutdownURL)
+
 	done := make(chan struct{})
 	go func() {
 		cmd.Wait()
 		close(done)
 	}()
+
 	select {
 	case <-done:
 		log.Println("goclaw exited gracefully")
@@ -482,6 +537,7 @@ func loadWindowPlacement(hwnd uintptr) {
 	}
 
 	_, _, _ = procSetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp)))
+	log.Println("Window position restored.")
 }
 
 func saveWindowPlacement(hwnd uintptr) {
@@ -497,6 +553,7 @@ func saveWindowPlacement(hwnd uintptr) {
 		if err == nil {
 			_ = os.MkdirAll(filepath.Join(executableDir(), "data"), 0755)
 			_ = os.WriteFile(windowPlacementPath(), data, 0644)
+			log.Println("Window position saved.")
 		}
 	}
 }
