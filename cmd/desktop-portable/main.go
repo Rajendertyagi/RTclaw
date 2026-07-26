@@ -311,6 +311,11 @@ if (data.state.token !== "%s") {
 
 	w.Run()
 
+	// Save window placement BEFORE destroying!
+	if hwnd := uintptr(w.Window()); hwnd != 0 {
+		saveWindowPlacement(hwnd)
+	}
+
 	// Destroy must be called on the main UI thread (per WebView2 COM rules)
 	w.Destroy()
 }
@@ -365,7 +370,9 @@ func onReady() {
 
 func onExit() {
 	log.Println("Exit triggered from system tray context menu.")
-	executeGlobalTeardown()
+	if appCancel != nil {
+		appCancel()
+	}
 }
 
 // executeGlobalTeardown unifies all exit paths into one ordered sequence.
@@ -390,18 +397,14 @@ func executeGlobalTeardown() {
 			log.Println("Timed out waiting for goclaw shutdown loop; proceeding with teardown")
 		}
 
-		// save window placement if webview still exists
-		if gv := getWebview(); gv != nil {
-			if hwnd := uintptr(gv.Window()); hwnd != 0 {
-				saveWindowPlacement(hwnd)
-			}
-		}
-
-		// ensure goclaw is stopped (best-effort)
+		// ensure goclaw is stopped (best-effort fallback)
 		goclawCmdMu.Lock()
 		cmd := goclawCmd
 		goclawCmdMu.Unlock()
-		shutdownGoclaw(cmd)
+		if cmd != nil && cmd.Process != nil {
+			log.Println("Force killing goclaw as a last resort...")
+			cmd.Process.Kill()
+		}
 
 		if pgMgr != nil {
 			pgMgr.Close()
@@ -448,32 +451,7 @@ func ShowToast(title, msg string) {
 
 
 
-func shutdownGoclaw(cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-	pid := cmd.Process.Pid
-	log.Printf("Sending graceful shutdown to goclaw (PID %d)...", pid)
-
-	// Try HTTP shutdown endpoint first
-	shutdownURL := gatewayURL("/shutdown")
-	client := &http.Client{Timeout: 2 * time.Second}
-	_, _ = client.Get(shutdownURL)
-
-	done := make(chan struct{})
-	go func() {
-		cmd.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		log.Println("goclaw exited gracefully")
-	case <-time.After(10 * time.Second):
-		log.Println("goclaw did not exit in time, force killing...")
-		cmd.Process.Kill()
-	}
-}
+// shutdownGoclaw was removed as it is now handled cleanly by the restart loop.
 
 func executableDir() string {
 	exe, err := os.Executable()
