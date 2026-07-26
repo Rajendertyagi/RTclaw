@@ -160,6 +160,7 @@ func main() {
 	// Webview runs on the main thread; systray pumps Win32 events independently.
 	token := os.Getenv("GOCLAW_GATEWAY_TOKEN")
 	w = webview.New(false)
+	defer w.Destroy()
 	if token != "" {
 		initJS := fmt.Sprintf(`(function(){
 var k="goclaw:auth";
@@ -201,6 +202,11 @@ func onReady() {
 
 	systray.SetOnDClick(func(menu systray.IMenu) {
 		showAppWindow()
+	})
+	systray.SetOnRClick(func(menu systray.IMenu) {
+		if err := menu.ShowMenu(); err != nil {
+			log.Printf("Failed to show systray menu: %v", err)
+		}
 	})
 
 	mShow := systray.AddMenuItem("Show Window", "Open the GoClaw desktop window")
@@ -250,9 +256,6 @@ func executeGlobalTeardown() {
 		if pgMgr != nil {
 			pgMgr.Close()
 		}
-
-		// Free the webview resource after Terminate has been called.
-		w.Destroy()
 
 		// Remove systray icon.
 		systray.Quit()
