@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"github.com/energye/systray"
+	"github.com/go-toast/toast"
 	"github.com/pkg/browser"
 	webview "github.com/webview/webview_go"
 )
@@ -113,7 +114,7 @@ const (
 func wndProc(hwnd uintptr, msg uint32, wparam, lparam uintptr) uintptr {
 	if msg == WM_CLOSE {
 		showWindow.Call(hwnd, SW_HIDE)
-		systray.ShowMessage("GoClaw", "Window minimized to tray")
+		ShowToast("GoClaw", "Window minimized to tray")
 		return 0
 	}
 	ret, _, _ := procCallWindowProc.Call(oldWndProc, uintptr(hwnd), uintptr(msg), wparam, lparam)
@@ -236,7 +237,7 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 		wndProcCallback = syscall.NewCallback(wndProc)
 		oldWndProc, _, _ = procSetWindowLongPtr.Call(
 			uintptr(hwnd),
-			-4, // GWL_WNDPROC
+			uintptr(-4), // GWL_WNDPROC
 			wndProcCallback,
 		)
 	}
@@ -289,27 +290,27 @@ func onReady() {
 
 	mShow.Click(func() {
 		showAppWindow(true)
-		systray.ShowMessage("GoClaw", "Window restored")
+		ShowToast("GoClaw", "Window restored")
 	})
 	mOpenWeb.Click(func() {
 		log.Printf("Opening browser at %s", gatewayURL(""))
 		browser.OpenURL(gatewayURL(""))
-		systray.ShowMessage("GoClaw", "Web UI opened in browser")
+		ShowToast("GoClaw", "Web UI opened in browser")
 	})
 	mRestart.Click(func() {
 		go func() {
 			// simple cooldown to avoid rapid repeated restarts
 			if !acquireRestartCooldown() {
-				systray.ShowMessage("GoClaw", "Restart cooldown active")
+				ShowToast("GoClaw", "Restart cooldown active")
 				return
 			}
 			defer releaseRestartCooldown()
 
 			if err := pgMgr.Restart("goclaw"); err != nil {
 				log.Printf("Failed to restart pg0: %v", err)
-				systray.ShowMessage("GoClaw", "DB restart failed")
+				ShowToast("GoClaw", "DB restart failed")
 			} else {
-				systray.ShowMessage("GoClaw", "Database restarted successfully")
+				ShowToast("GoClaw", "Database restarted successfully")
 			}
 		}()
 	})
@@ -337,7 +338,7 @@ func executeGlobalTeardown() {
 
 		// save window placement if webview still exists
 		if gv := getWebview(); gv != nil {
-			if hwnd := gv.Window(); hwnd != 0 {
+			if hwnd := gv.Window(); hwnd != nil {
 				saveWindowPlacement(uintptr(hwnd))
 			}
 		}
@@ -369,7 +370,7 @@ func showAppWindow(forceNormal bool) {
 	if gv := getWebview(); gv != nil {
 		gv.Dispatch(func() {
 			hwnd := gv.Window()
-			if hwnd != 0 {
+			if hwnd != nil {
 				if forceNormal {
 					// Restore to normal if minimized
 					showWindow.Call(uintptr(hwnd), SW_SHOWNORMAL)
@@ -380,6 +381,19 @@ func showAppWindow(forceNormal bool) {
 			}
 			gv.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
 		})
+	}
+}
+
+const toastAppID = "com.goclaw.portable"
+
+func ShowToast(title, msg string) {
+	notification := toast.Notification{
+		AppID:   toastAppID,
+		Title:   title,
+		Message: msg,
+	}
+	if err := notification.Push(); err != nil {
+		log.Printf("toast push failed: %v", err)
 	}
 }
 
