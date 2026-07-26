@@ -71,7 +71,7 @@ jobs:
         run: |
           go install github.com/tc-hib/go-winres@latest
           cd cmd/desktop-portable
-          go-winres make --icon icon.ico
+          go-winres simply --icon icon.ico
           go build -ldflags="-s -w" -o ../../build/goclaw-portable.exe .
 
       - name: Get latest pg0 version
