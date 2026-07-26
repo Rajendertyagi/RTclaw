@@ -104,10 +104,11 @@ var (
 )
 
 const (
-	WM_SETICON = 0x0080
-	WM_CLOSE   = 0x0010
-	ICON_SMALL = 0
-	ICON_BIG   = 1
+	GWL_WNDPROC = -4
+	WM_SETICON  = 0x0080
+	WM_CLOSE    = 0x0010
+	ICON_SMALL  = 0
+	ICON_BIG    = 1
 )
 
 // Custom window procedure intercepts WM_CLOSE to hide-to-tray instead of closing.
@@ -237,9 +238,12 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 		wndProcCallback = syscall.NewCallback(wndProc)
 		oldWndProc, _, _ = procSetWindowLongPtr.Call(
 			uintptr(hwnd),
-			uintptr(-4), // GWL_WNDPROC
+			uintptr(int32(GWL_WNDPROC)),
 			wndProcCallback,
 		)
+		if oldWndProc == 0 {
+			log.Println("SetWindowLongPtr failed: returned zero (previous WndProc)")
+		}
 	}
 
 	// Signal watcher: Ctrl+C / SIGTERM closes the webview, triggers teardown.
