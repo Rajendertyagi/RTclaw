@@ -83,6 +83,11 @@ var (
 	appCancel                  context.CancelFunc
 	teardownOnce               sync.Once
 	oldWndProc                 uintptr
+	wndProcCallback             uintptr
+	instanceMutex               syscall.Handle
+	wMu                         sync.Mutex
+	restartMu                   sync.Mutex
+	lastRestart                 time.Time
 	kernel32                   = syscall.NewLazyDLL("kernel32.dll")
 	procCreateMutex            = kernel32.NewProc("CreateMutexW")
 	procGetLastError           = kernel32.NewProc("GetLastError")
@@ -117,11 +122,25 @@ func wndProc(hwnd uintptr, msg uint32, wparam, lparam uintptr) uintptr {
 
 func ensureSingleInstance(name string) bool {
 	h, _, _ := procCreateMutex.Call(0, 1, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(name))))
+	// keep the handle so the mutex stays owned for the process lifetime
+	instanceMutex = syscall.Handle(h)
 	lastErr, _, _ := procGetLastError.Call()
 	if lastErr == 183 { // ERROR_ALREADY_EXISTS
 		return false
 	}
 	return true
+}
+
+func setWebview(nw webview.WebView) {
+	wMu.Lock()
+	defer wMu.Unlock()
+	w = nw
+}
+
+func getWebview() webview.WebView {
+	wMu.Lock()
+	defer wMu.Unlock()
+	return w
 }
 
 func main() {
@@ -193,6 +212,7 @@ func main() {
 	// Webview runs on the main thread; systray pumps Win32 events independently.
 	token := os.Getenv("GOCLAW_GATEWAY_TOKEN")
 	w = webview.New(false)
+	setWebview(w)
 	if token != "" {
 		initJS := fmt.Sprintf(`(function(){
 var k="goclaw:auth";
@@ -212,10 +232,12 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 	if hwnd != nil {
 		setAppIcon(uintptr(hwnd))
 		loadWindowPlacement(uintptr(hwnd))
+		// keep the callback value alive in a package var so it is not GC'd
+		wndProcCallback = syscall.NewCallback(wndProc)
 		oldWndProc, _, _ = procSetWindowLongPtr.Call(
 			uintptr(hwnd),
 			-4, // GWL_WNDPROC
-			syscall.NewCallback(wndProc),
+			wndProcCallback,
 		)
 	}
 
@@ -223,13 +245,30 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 	go func() {
 		<-globalCtx.Done()
 		log.Println("Shutdown signal received (Ctrl+C / SIGTERM). Closing webview...")
-		w.Terminate()
+		if gv := getWebview(); gv != nil {
+			gv.Terminate()
+		}
 	}()
 
 	w.Run()
 
 	// Single teardown path for all exit routes (user close, Quit menu, OS signal).
 	executeGlobalTeardown()
+}
+
+// acquireRestartCooldown returns true if the restart is allowed (cooldown elapsed).
+func acquireRestartCooldown() bool {
+	restartMu.Lock()
+	defer restartMu.Unlock()
+	if time.Since(lastRestart) < 5*time.Second {
+		return false
+	}
+	lastRestart = time.Now()
+	return true
+}
+
+// releaseRestartCooldown is a no-op for now; kept for symmetry in case we want to extend behavior.
+func releaseRestartCooldown() {
 }
 
 func onReady() {
@@ -259,6 +298,13 @@ func onReady() {
 	})
 	mRestart.Click(func() {
 		go func() {
+			// simple cooldown to avoid rapid repeated restarts
+			if !acquireRestartCooldown() {
+				systray.ShowMessage("GoClaw", "Restart cooldown active")
+				return
+			}
+			defer releaseRestartCooldown()
+
 			if err := pgMgr.Restart("goclaw"); err != nil {
 				log.Printf("Failed to restart pg0: %v", err)
 				systray.ShowMessage("GoClaw", "DB restart failed")
@@ -268,7 +314,9 @@ func onReady() {
 		}()
 	})
 	mQuit.Click(func() {
-		w.Terminate() // teardown handles systray.Quit
+		if gv := getWebview(); gv != nil {
+			gv.Terminate() // teardown handles systray.Quit
+		}
 	})
 }
 
@@ -287,9 +335,11 @@ func executeGlobalTeardown() {
 			appCancel()
 		}
 
-		hwnd := w.Window()
-		if hwnd != nil {
-			saveWindowPlacement(uintptr(hwnd))
+		// save window placement if webview still exists
+		if gv := getWebview(); gv != nil {
+			if hwnd := gv.Window(); hwnd != 0 {
+				saveWindowPlacement(uintptr(hwnd))
+			}
 		}
 
 		shutdownGoclaw(goclawCmd)
@@ -298,29 +348,39 @@ func executeGlobalTeardown() {
 			pgMgr.Close()
 		}
 
-		w.Destroy()
+		if gv := getWebview(); gv != nil {
+			gv.Destroy()
+		}
 
 		// Remove systray icon only once
 		systray.Quit()
+
+		// close the instance mutex handle if we created one
+		if instanceMutex != 0 {
+			syscall.CloseHandle(instanceMutex)
+			instanceMutex = 0
+		}
 
 		log.Println("All portable services closed cleanly.")
 	})
 }
 
 func showAppWindow(forceNormal bool) {
-	w.Dispatch(func() {
-		hwnd := w.Window()
-		if hwnd != nil {
-			if forceNormal {
-				// Restore to normal if minimized
-				showWindow.Call(uintptr(hwnd), SW_SHOWNORMAL)
-			} else {
-				// Bring to front without changing state
-				showWindow.Call(uintptr(hwnd), SW_SHOWNA)
+	if gv := getWebview(); gv != nil {
+		gv.Dispatch(func() {
+			hwnd := gv.Window()
+			if hwnd != 0 {
+				if forceNormal {
+					// Restore to normal if minimized
+					showWindow.Call(uintptr(hwnd), SW_SHOWNORMAL)
+				} else {
+					// Bring to front without changing state
+					showWindow.Call(uintptr(hwnd), SW_SHOWNA)
+				}
 			}
-		}
-		w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
-	})
+			gv.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
+		})
+	}
 }
 
 func iconData() []byte { return tbIconData }
@@ -407,7 +467,9 @@ func startSilent(name string, args ...string) *exec.Cmd {
 
 func generateKey(n int) string {
 	b := make([]byte, n)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("failed to generate key: %v", err)
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -498,6 +560,13 @@ func waitForURL(url string, timeout time.Duration) {
 		}
 		if resp != nil {
 			resp.Body.Close()
+		}
+		// allow shutdown to interrupt waiting
+		select {
+		case <-globalCtx.Done():
+			log.Println("waitForURL aborted due to shutdown")
+			return
+		default:
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
