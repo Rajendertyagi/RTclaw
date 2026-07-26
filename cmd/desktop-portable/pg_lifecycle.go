@@ -208,24 +208,24 @@ func (m *PGManager) HealthCheckLoop() {
 
 	for {
 		m.mu.Lock()
-		ctx := m.ctx
+		loopCtx := m.ctx
+		restartDb := m.dbName
 		m.mu.Unlock()
+		if restartDb == "" {
+			restartDb = "goclaw"
+		}
 
 		select {
 		case <-ticker.C:
 			if !m.Aliveness() && !m.IsProcessRunning() {
 				log.Println("pg0 dead — attempting recovery restart...")
-				restartDb := m.dbName
-				if restartDb == "" {
-					restartDb = "goclaw"
-				}
 				m.Stop()
 				time.Sleep(2 * time.Second) // backoff
 				if err := m.Start(restartDb); err != nil {
 					log.Printf("pg0 recovery failed: %v", err)
 				}
 			}
-		case <-ctx.Done():
+		case <-loopCtx.Done():
 			log.Println("pg0 health check loop exiting due to cancellation")
 			return
 		}
