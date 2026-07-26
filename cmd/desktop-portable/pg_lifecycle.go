@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -20,18 +19,15 @@ import (
 	_ "github.com/lib/pq"
 )
 
+// PGManager manages the pg0 PostgreSQL process lifecycle.
 type PGManager struct {
-	pg0Path   string
-	pidFile   string
-	pg0Cmd    *exec.Cmd
-	db        *sql.DB
-	mu        sync.Mutex
-	isAlive   bool
-	exitDone  chan struct{}
-	closeOnce sync.Once
-	dbName    string
-	ctx       context.Context
-	cancel    context.CancelFunc
+	pg0Path string
+	pidFile string
+	dbName  string
+	db      *sql.DB
+	mu      sync.Mutex
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 func NewPGManager(pg0Path, dataDir string) *PGManager {
@@ -41,6 +37,7 @@ func NewPGManager(pg0Path, dataDir string) *PGManager {
 	}
 }
 
+// Start invokes pg0 start and blocks until the database accepts connections.
 func (m *PGManager) Start(dbName string) error {
 	m.mu.Lock()
 	if m.cancel != nil {
@@ -50,63 +47,38 @@ func (m *PGManager) Start(dbName string) error {
 	m.dbName = dbName
 	m.mu.Unlock()
 
+	// Remove stale lock file if the process listed inside no longer exists
 	if err := m.cleanStaleLockNatively(); err != nil {
-		return fmt.Errorf("failed to clear database lock gates safely: %w", err)
+		return err
 	}
 
-	m.pg0Cmd = exec.Command(m.pg0Path, "start",
+	// pg0 start launches PostgreSQL in the background and exits quickly
+	startCmd := exec.Command(m.pg0Path, "start",
 		"--name", "goclaw-portable",
 		"--data-dir", filepath.Dir(m.pidFile),
 		"--database", dbName,
 		"--port", "5432",
 	)
-	m.pg0Cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:    true,
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
-	}
-	m.pg0Cmd.Stdout, m.pg0Cmd.Stderr = os.Stdout, os.Stderr
+	startCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	startCmd.Stdout, startCmd.Stderr = os.Stdout, os.Stderr
 
-	log.Println("Starting pg0...")
-	if err := m.pg0Cmd.Start(); err != nil {
+	log.Println("Starting pg0 wrapper...")
+	if err := startCmd.Run(); err != nil {
+		return fmt.Errorf("pg0 wrapper failed to execute launch: %w", err)
+	}
+
+	// Wait for the actual PostgreSQL server to accept connections
+	dsn := buildPgDSN(dbName)
+	db, err := m.waitForDB(dsn, 30*time.Second)
+	if err != nil {
+		log.Printf("Database server failed to respond post-launch: %v", err)
+		m.Stop()
 		return err
 	}
 
 	m.mu.Lock()
-	m.isAlive = true
-	m.exitDone = make(chan struct{})
-	m.closeOnce = sync.Once{}
-	m.mu.Unlock()
-
-	go func(cmd *exec.Cmd, done chan struct{}) {
-		_ = cmd.Wait()
-		m.mu.Lock()
-		m.isAlive = false
-		m.mu.Unlock()
-		log.Println("pg0 background process exited")
-		m.closeOnce.Do(func() { close(done) })
-	}(m.pg0Cmd, m.exitDone)
-
-	dsn := buildPgDSN(dbName)
-	db, err := m.waitForDB(dsn, 30*time.Second)
-	if err != nil {
-		m.mu.Lock()
-		if m.cancel != nil {
-			m.cancel()
-		}
-		m.isAlive = false
-		cmd := m.pg0Cmd
-		done := m.exitDone
-		m.mu.Unlock()
-
-		if cmd != nil && cmd.Process != nil {
-			cmd.Process.Kill()
-		}
-		if done != nil {
-			<-done
-		}
-		return err
-	}
 	m.db = db
+	m.mu.Unlock()
 	return nil
 }
 
@@ -127,63 +99,58 @@ func buildPgDSN(dbName string) string {
 	if port == 0 {
 		port = 5432
 	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", user, pass, host, port, dbName)
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+		user, pass, host, port, dbName)
 }
 
+// Stop shuts down the PostgreSQL process gracefully, then force-kills if hung.
 func (m *PGManager) Stop() {
-	log.Println("Shutting down pg0...")
+	log.Println("Shutting down pg0 database...")
 
 	m.mu.Lock()
 	if m.db != nil {
-		if err := m.db.Close(); err != nil {
-			log.Printf("pg0: error closing database connection: %v", err)
-		}
+		_ = m.db.Close()
 		m.db = nil
 	}
 	if m.cancel != nil {
 		m.cancel()
 	}
-	cmd := m.pg0Cmd
-	done := m.exitDone
 	m.mu.Unlock()
 
-	if cmd == nil || cmd.Process == nil {
-		log.Println("pg0: no running process to stop")
-		if done != nil {
-			<-done
-		}
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	stopCmd := exec.CommandContext(ctx, m.pg0Path, "stop",
+	// Graceful shutdown via pg0 stop
+	stopCmd := exec.Command(m.pg0Path, "stop",
 		"--name", "goclaw-portable",
 		"--data-dir", filepath.Dir(m.pidFile),
 	)
 	stopCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = stopCmd.Run()
 
-	if err := stopCmd.Run(); err != nil {
-		log.Printf("pg0 stop command failed — force killing process (PID %d): %v", cmd.Process.Pid, err)
-		if err := cmd.Process.Kill(); err != nil {
-			log.Printf("pg0: force kill failed: %v", err)
+	// Allow time for file descriptor cleanup
+	time.Sleep(500 * time.Millisecond)
+
+	// Force-kill if the PostgreSQL PID is still alive
+	if pid, err := m.readPidFromLockFile(); err == nil && pid > 0 {
+		if processExists(pid) {
+			log.Printf("Postgres process (PID %d) hung after stop signal — force killing...", pid)
+			if proc, err := os.FindProcess(pid); err == nil {
+				_ = proc.Kill()
+				_ = proc.Wait()
+			}
 		}
 	}
 
-	if done != nil {
-		<-done
-	}
-
-	if _, err := os.Stat(m.pidFile); err == nil {
-		if err := os.Remove(m.pidFile); err != nil {
-			log.Printf("pg0: error removing stale pid file %s: %v", m.pidFile, err)
-		}
-	}
-
-	log.Println("pg0 shutdown complete")
+	_ = os.Remove(m.pidFile)
+	log.Println("Database shutdown complete.")
 }
 
+// DB returns a mutex-safe reference to the *sql.DB handle.
+func (m *PGManager) DB() *sql.DB {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.db
+}
+
+// Aliveness validates a real database ping.
 func (m *PGManager) Aliveness() bool {
 	m.mu.Lock()
 	db := m.db
@@ -195,13 +162,17 @@ func (m *PGManager) Aliveness() bool {
 	return db.Ping() == nil
 }
 
+// IsProcessRunning reads postmaster.pid and checks if that exact PID is running.
 func (m *PGManager) IsProcessRunning() bool {
-	m.mu.Lock()
-	alive := m.isAlive
-	m.mu.Unlock()
-	return alive
+	pid, err := m.readPidFromLockFile()
+	if err != nil || pid <= 0 {
+		return false
+	}
+	return processExists(pid)
 }
 
+// HealthCheckLoop monitors database health and triggers recovery only when
+// both the DB ping fails AND the OS process has died.
 func (m *PGManager) HealthCheckLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -211,6 +182,10 @@ func (m *PGManager) HealthCheckLoop() {
 		loopCtx := m.ctx
 		restartDb := m.dbName
 		m.mu.Unlock()
+
+		if loopCtx == nil {
+			return
+		}
 		if restartDb == "" {
 			restartDb = "goclaw"
 		}
@@ -218,15 +193,15 @@ func (m *PGManager) HealthCheckLoop() {
 		select {
 		case <-ticker.C:
 			if !m.Aliveness() && !m.IsProcessRunning() {
-				log.Println("pg0 dead — attempting recovery restart...")
+				log.Println("CRITICAL: Underlying database process is completely dead. Triggering recovery restart...")
 				m.Stop()
-				time.Sleep(2 * time.Second) // backoff
+				time.Sleep(2 * time.Second)
 				if err := m.Start(restartDb); err != nil {
-					log.Printf("pg0 recovery failed: %v", err)
+					log.Printf("Database recovery restart failed: %v", err)
 				}
 			}
 		case <-loopCtx.Done():
-			log.Println("pg0 health check loop exiting due to cancellation")
+			log.Println("Database health check loop exiting.")
 			return
 		}
 	}
@@ -241,75 +216,54 @@ func (m *PGManager) waitForDB(dsn string, timeout time.Duration) (*sql.DB, error
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := db.Ping(); err == nil {
-			log.Println("Database connection verified")
+			log.Println("Database layer connection verified.")
 			return db, nil
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	_ = db.Close()
+	return nil, errors.New("timeout waiting for database instance response")
+}
 
-	db.Close()
-	return nil, errors.New("pg0 failed to start within " + timeout.String())
+func (m *PGManager) readPidFromLockFile() (int, error) {
+	data, err := os.ReadFile(m.pidFile)
+	if err != nil {
+		return 0, err
+	}
+	lines := strings.Split(string(data), "\n")
+	if len(lines) == 0 {
+		return 0, errors.New("empty pid file")
+	}
+	pidStr := strings.TrimSpace(lines[0])
+	return strconv.Atoi(pidStr)
 }
 
 func processExists(pid int) bool {
-	switch runtime.GOOS {
-	case "windows":
+	if runtime.GOOS == "windows" {
 		cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH")
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		var out bytes.Buffer
-		cmd.Stdout = &out
-		if err := cmd.Run(); err == nil {
-			return strings.Contains(out.String(), fmt.Sprintf("%d", pid))
-		}
-		return false
-	default:
-		// On Unix, FindProcess always returns a non-nil Process on success,
-		// so we use Signal(0) which is a no-op that checks existence.
-		p, err := os.FindProcess(pid)
-		if err != nil {
-			return false
-		}
-		return p.Signal(syscall.Signal(0)) == nil
+		out, err := cmd.Output()
+		return err == nil && strings.Contains(string(out), fmt.Sprintf("%d", pid))
 	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
 }
 
 func (m *PGManager) cleanStaleLockNatively() error {
-	if _, err := os.Stat(m.pidFile); os.IsNotExist(err) {
-		return nil
-	}
-
-	data, err := os.ReadFile(m.pidFile)
+	pid, err := m.readPidFromLockFile()
 	if err != nil {
-		if rmErr := os.Remove(m.pidFile); rmErr != nil {
-			log.Printf("pg0: failed to remove unreadable pid file %s: %v", m.pidFile, rmErr)
-		}
-		return nil
-	}
-
-	pidStr := strings.TrimSpace(strings.Split(string(data), "\n")[0])
-	if pidStr == "" {
-		if err := os.Remove(m.pidFile); err != nil {
-			log.Printf("pg0: failed to remove pid file with empty PID: %v", err)
-		}
-		return nil
-	}
-
-	pid, err := strconv.Atoi(pidStr)
-	if err != nil {
-		log.Printf("pg0: invalid PID %q in pid file — removing", pidStr)
-		if err := os.Remove(m.pidFile); err != nil {
-			log.Printf("pg0: failed to remove pid file with invalid PID: %v", err)
-		}
+		_ = os.Remove(m.pidFile)
 		return nil
 	}
 
 	if processExists(pid) {
-		return fmt.Errorf("database engine process %d is actively running", pid)
+		return fmt.Errorf("database engine (PID %d) is actively running; refusing to clear lock or spawn clone", pid)
 	}
 
-	log.Printf("Removing stale lock file for inactive PID %d", pid)
-	if err := os.Remove(m.pidFile); err != nil {
-		log.Printf("pg0: error removing stale pid file %s: %v", m.pidFile, err)
-	}
+	log.Printf("Removing dead lock file for stale PID %d", pid)
+	_ = os.Remove(m.pidFile)
 	return nil
 }
