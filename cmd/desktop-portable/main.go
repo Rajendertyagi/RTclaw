@@ -118,8 +118,13 @@ func wndProc(hwnd uintptr, msg uint32, wparam, lparam uintptr) uintptr {
 		ShowToast("GoClaw", "Window minimized to tray")
 		return 0
 	}
-	ret, _, _ := procCallWindowProc.Call(oldWndProc, uintptr(hwnd), uintptr(msg), wparam, lparam)
-	return ret
+
+	if oldWndProc != 0 {
+		ret, _, _ := procCallWindowProc.Call(oldWndProc, uintptr(hwnd), uintptr(msg), wparam, lparam)
+		return ret
+	}
+
+	return 0
 }
 
 func ensureSingleInstance(name string) bool {
@@ -230,20 +235,21 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 	w.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
 	w.Navigate(gatewayURL(""))
 
-	hwnd := w.Window()
-	if hwnd != nil {
-		setAppIcon(uintptr(hwnd))
-		loadWindowPlacement(uintptr(hwnd))
-		// keep the callback value alive in a package var so it is not GC'd
+	hwnd := uintptr(w.Window())
+	if hwnd != 0 {
+		setAppIcon(hwnd)
+		loadWindowPlacement(hwnd)
 		wndProcCallback = syscall.NewCallback(wndProc)
-		oldWndProc, _, _ = procSetWindowLongPtr.Call(
-			uintptr(hwnd),
+		old, _, _ := procSetWindowLongPtr.Call(
+			hwnd,
 			uintptr(int32(GWL_WNDPROC)),
 			wndProcCallback,
 		)
-		if oldWndProc == 0 {
-			log.Println("SetWindowLongPtr failed: returned zero (previous WndProc)")
+		if old == 0 {
+			lastErr, _, _ := procGetLastError.Call()
+			log.Printf("SetWindowLongPtr failed: previous WndProc == 0, GetLastError=%d", lastErr)
 		}
+		oldWndProc = old
 	}
 
 	// Signal watcher: Ctrl+C / SIGTERM closes the webview, triggers teardown.
@@ -342,8 +348,8 @@ func executeGlobalTeardown() {
 
 		// save window placement if webview still exists
 		if gv := getWebview(); gv != nil {
-			if hwnd := gv.Window(); hwnd != nil {
-				saveWindowPlacement(uintptr(hwnd))
+			if hwnd := uintptr(gv.Window()); hwnd != 0 {
+				saveWindowPlacement(hwnd)
 			}
 		}
 
@@ -373,14 +379,12 @@ func executeGlobalTeardown() {
 func showAppWindow(forceNormal bool) {
 	if gv := getWebview(); gv != nil {
 		gv.Dispatch(func() {
-			hwnd := gv.Window()
-			if hwnd != nil {
+			hwnd := uintptr(gv.Window())
+			if hwnd != 0 {
 				if forceNormal {
-					// Restore to normal if minimized
-					showWindow.Call(uintptr(hwnd), SW_SHOWNORMAL)
+					showWindow.Call(hwnd, SW_SHOWNORMAL)
 				} else {
-					// Bring to front without changing state
-					showWindow.Call(uintptr(hwnd), SW_SHOWNA)
+					showWindow.Call(hwnd, SW_SHOWNA)
 				}
 			}
 			gv.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
