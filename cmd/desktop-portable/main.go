@@ -149,11 +149,14 @@ func main() {
 	waitForURL(gatewayURL(Config.HealthPath), Config.StartTimeout)
 
 	log.Println("GoClaw background services ready — starting system tray on dedicated goroutine...")
-	go systray.Register(onReady, onExit)
+	go func() {
+		systray.Register(onReady, onExit)
+	}()
 
 	// Webview runs on the main thread; systray pumps Win32 events independently.
 	token := os.Getenv("GOCLAW_GATEWAY_TOKEN")
 	w = webview.New(false)
+	defer w.Destroy()
 	if token != "" {
 		initJS := fmt.Sprintf(`(function(){
 var k="goclaw:auth";
@@ -176,9 +179,6 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 	}
 
 	w.Run()
-	w.Destroy()
-	systray.Quit()
-	os.Exit(0)
 }
 
 func onReady() {
