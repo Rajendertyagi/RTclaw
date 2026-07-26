@@ -132,7 +132,7 @@ func (m *PGManager) Stop() {
 			log.Printf("Postgres process (PID %d) hung after stop signal — force killing...", pid)
 			if proc, err := os.FindProcess(pid); err == nil {
 				_ = proc.Kill()
-				_ = proc.Wait()
+				_, _ = proc.Wait()
 			}
 		}
 	}
