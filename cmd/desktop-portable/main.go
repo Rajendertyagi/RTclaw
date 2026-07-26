@@ -217,7 +217,7 @@ func onExit() {
 	}
 	shutdownGoclaw(goclawCmd)
 	if pgMgr != nil {
-		pgMgr.Stop()
+		pgMgr.Close()
 	}
 }
 

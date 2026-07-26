@@ -40,10 +40,9 @@ func NewPGManager(pg0Path, dataDir string) *PGManager {
 // Start invokes pg0 start and blocks until the database accepts connections.
 func (m *PGManager) Start(dbName string) error {
 	m.mu.Lock()
-	if m.cancel != nil {
-		m.cancel()
+	if m.ctx == nil {
+		m.ctx, m.cancel = context.WithCancel(context.Background())
 	}
-	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.dbName = dbName
 	m.mu.Unlock()
 
@@ -73,10 +72,6 @@ func (m *PGManager) Start(dbName string) error {
 	if err != nil {
 		log.Printf("Database server failed to respond post-launch: %v", err)
 		m.Stop()
-		// Re-create context so HealthCheckLoop doesn't see a cancelled ctx and exit
-		m.mu.Lock()
-		m.ctx, m.cancel = context.WithCancel(context.Background())
-		m.mu.Unlock()
 		return err
 	}
 
@@ -108,6 +103,8 @@ func buildPgDSN(dbName string) string {
 }
 
 // Stop shuts down the PostgreSQL process gracefully, then force-kills if hung.
+// It does NOT cancel the manager context — that is the responsibility of Close(),
+// so the health-check loop survives recovery Stop/Start cycles.
 func (m *PGManager) Stop() {
 	log.Println("Shutting down pg0 database...")
 
@@ -115,9 +112,6 @@ func (m *PGManager) Stop() {
 	if m.db != nil {
 		_ = m.db.Close()
 		m.db = nil
-	}
-	if m.cancel != nil {
-		m.cancel()
 	}
 	m.mu.Unlock()
 
@@ -145,6 +139,18 @@ func (m *PGManager) Stop() {
 
 	_ = os.Remove(m.pidFile)
 	log.Println("Database shutdown complete.")
+}
+
+// Close cancels the manager context (signals HealthCheckLoop to exit) then stops
+// the database process. This is the application-shutdown path. For recovery
+// within the health loop, call Stop() alone so the context stays valid.
+func (m *PGManager) Close() {
+	m.mu.Lock()
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.mu.Unlock()
+	m.Stop()
 }
 
 // DB returns a mutex-safe reference to the *sql.DB handle.
