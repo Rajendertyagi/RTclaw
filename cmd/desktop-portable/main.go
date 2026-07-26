@@ -52,6 +52,8 @@ var Config = struct {
 
 var (
 	goclawCmd                 *exec.Cmd
+	goclawCmdMu               sync.Mutex
+	goclawShutdownWg          sync.WaitGroup
 	pgMgr                      *PGManager
 	w                          webview.WebView
 	globalCtx                  context.Context
@@ -67,6 +69,7 @@ var (
 	procSetLastError           = kernel32.NewProc("SetLastError")
 	user32                     = syscall.NewLazyDLL("user32.dll")
 	showWindow                 = user32.NewProc("ShowWindow")
+	setForegroundWindow        = user32.NewProc("SetForegroundWindow")
 	defWindowProc              = user32.NewProc("DefWindowProcW")
 	procGetWindowPlacement     = user32.NewProc("GetWindowPlacement")
 	procSetWindowPlacement     = user32.NewProc("SetWindowPlacement")
@@ -75,6 +78,8 @@ var (
 	procSendMessageW           = user32.NewProc("SendMessageW")
 	procSetWindowLongPtr       = user32.NewProc("SetWindowLongPtrW")
 	procCallWindowProc         = user32.NewProc("CallWindowProcW")
+	dwmapi                     = syscall.NewLazyDLL("dwmapi.dll")
+	procDwmSetWindowAttribute  = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 const (
@@ -85,6 +90,10 @@ const (
 	ICON_BIG    = 1
 	
 	toastAppID = "com.goclaw.portable"
+
+	DWMWA_USE_IMMERSIVE_DARK_MODE  = 20
+	DWMWA_WINDOW_CORNER_PREFERENCE = 33
+	DWMWCP_ROUND                   = 2
 )
 
 
@@ -94,6 +103,8 @@ func main() {
 		log.Println("Another instance is already running.")
 		return
 	}
+
+	ShowToast("GoClaw", "GoClaw is booting up! Please wait a moment...")
 
 	// Unified lifecycle: Ctrl+C, SIGTERM, or normal exit all converge to one path.
 	globalCtx, appCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -150,14 +161,84 @@ func main() {
 	go pgMgr.HealthCheckLoop()
 
 	goclawExe := filepath.Join(root, "goclaw.exe")
-	var err error
-	goclawCmd, err = startSilent(goclawExe)
-	if err != nil {
-		log.Printf("failed to start goclaw: %v", err)
-		return
-	}
+
+	// safe restart loop
+	go func() {
+		// indicate the loop is running and will perform shutdown work
+		goclawShutdownWg.Add(1)
+		defer func() {
+			goclawShutdownWg.Done()
+		}()
+
+		backoff := 3 * time.Second
+		maxBackoff := 30 * time.Second
+
+		for {
+			if globalCtx.Err() != nil {
+				return
+			}
+
+			cmd, err := startSilent(goclawExe)
+			if err != nil {
+				log.Printf("failed to start goclaw: %v; retrying in %s", err, backoff)
+				select {
+				case <-time.After(backoff):
+					backoff *= 2
+					if backoff > maxBackoff { backoff = maxBackoff }
+					continue
+				case <-globalCtx.Done():
+					return
+				}
+			}
+
+			goclawCmdMu.Lock()
+			goclawCmd = cmd
+			goclawCmdMu.Unlock()
+
+			backoff = 3 * time.Second
+
+			done := make(chan error, 1)
+			go func(c *exec.Cmd) { done <- c.Wait() }(cmd)
+
+			select {
+			case <-globalCtx.Done():
+				// graceful shutdown attempt
+				shutdownURL := gatewayURL("/shutdown")
+				client := &http.Client{Timeout: 2 * time.Second}
+				_, _ = client.Get(shutdownURL)
+
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					if cmd.Process != nil { _ = cmd.Process.Kill() }
+					<-done
+				}
+
+				goclawCmdMu.Lock(); goclawCmd = nil; goclawCmdMu.Unlock()
+				return
+
+			case err := <-done:
+				if err != nil {
+					log.Printf("goclaw exited with error: %v", err)
+				} else {
+					log.Println("goclaw exited normally")
+				}
+				goclawCmdMu.Lock(); goclawCmd = nil; goclawCmdMu.Unlock()
+
+				if globalCtx.Err() != nil { return }
+
+				select {
+				case <-time.After(3 * time.Second):
+				case <-globalCtx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	// We still want to block startup until goclaw is healthy the first time
 	if err := waitForURL(globalCtx, gatewayURL(Config.HealthPath), Config.StartTimeout); err != nil {
-		log.Printf("goclaw health check failed: %v", err)
+		log.Printf("goclaw initial health check failed: %v", err)
 		return
 	}
 
@@ -194,6 +275,15 @@ if (data.state.token !== "%s") {
 	if hwnd != 0 {
 		setAppIcon(hwnd)
 		loadWindowPlacement(hwnd)
+
+		// Apply native polish (run on GUI thread)
+		if err := SetImmersiveDarkMode(hwnd, true); err != nil {
+			log.Printf("SetImmersiveDarkMode: %v", err)
+		}
+		if err := SetWindowCornerPreference(hwnd, DWMWCP_ROUND); err != nil {
+			log.Printf("SetWindowCornerPreference: %v", err)
+		}
+
 		wndProcCallback = syscall.NewCallback(wndProc)
 		procSetLastError.Call(0)
 		old, _, _ := procSetWindowLongPtr.Call(
@@ -284,8 +374,20 @@ func executeGlobalTeardown() {
 	teardownOnce.Do(func() {
 		log.Println("Executing synchronized global cleanup...")
 
-		if appCancel != nil {
-			appCancel()
+		if appCancel != nil { appCancel() }
+
+		// Wait for goclaw restart loop to finish its shutdown work, but don't block forever.
+		done := make(chan struct{})
+		go func() {
+			goclawShutdownWg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// loop finished; safe to continue
+		case <-time.After(10 * time.Second):
+			log.Println("Timed out waiting for goclaw shutdown loop; proceeding with teardown")
 		}
 
 		// save window placement if webview still exists
@@ -295,7 +397,11 @@ func executeGlobalTeardown() {
 			}
 		}
 
-		shutdownGoclaw(goclawCmd)
+		// ensure goclaw is stopped (best-effort)
+		goclawCmdMu.Lock()
+		cmd := goclawCmd
+		goclawCmdMu.Unlock()
+		shutdownGoclaw(cmd)
 
 		if pgMgr != nil {
 			pgMgr.Close()
@@ -304,7 +410,6 @@ func executeGlobalTeardown() {
 		// Remove systray icon only once
 		systray.Quit()
 
-		// close the instance mutex handle if we created one
 		if instanceMutex != 0 {
 			syscall.CloseHandle(instanceMutex)
 			instanceMutex = 0
@@ -321,11 +426,11 @@ func showAppWindow(forceNormal bool) {
 			if hwnd != 0 {
 				if forceNormal {
 					showWindow.Call(hwnd, SW_SHOWNORMAL)
+					setForegroundWindow.Call(hwnd)
 				} else {
 					showWindow.Call(hwnd, SW_SHOWNA)
 				}
 			}
-			gv.SetSize(Config.WindowWidth, Config.WindowHeight, webview.HintNone)
 		})
 	}
 }
@@ -530,4 +635,31 @@ func getWebview() webview.WebView {
 	wMu.Lock()
 	defer wMu.Unlock()
 	return w
+}
+
+// setWindowAttributeUint32 sets a uint32 DWM attribute; returns error on nonzero result.
+func setWindowAttributeUint32(hwnd uintptr, attr uint32, value uint32) error {
+	v := value
+	r, _, err := procDwmSetWindowAttribute.Call(
+		uintptr(hwnd),
+		uintptr(attr),
+		uintptr(unsafe.Pointer(&v)),
+		uintptr(unsafe.Sizeof(v)),
+	)
+	if r != 0 {
+		return fmt.Errorf("DwmSetWindowAttribute failed: ret=%d err=%v", r, err)
+	}
+	return nil
+}
+
+func SetImmersiveDarkMode(hwnd uintptr, enable bool) error {
+	var v uint32
+	if enable {
+		v = 1
+	}
+	return setWindowAttributeUint32(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, v)
+}
+
+func SetWindowCornerPreference(hwnd uintptr, pref uint32) error {
+	return setWindowAttributeUint32(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, pref)
 }

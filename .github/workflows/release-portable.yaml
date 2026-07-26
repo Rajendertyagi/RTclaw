@@ -72,7 +72,7 @@ jobs:
           go install github.com/tc-hib/go-winres@latest
           cd cmd/desktop-portable
           go-winres simply --icon icon.ico
-          go build -ldflags="-s -w" -o ../../build/goclaw-portable.exe .
+          go build -ldflags="-s -w -H windowsgui" -o ../../build/goclaw-portable.exe .
 
       - name: Get latest pg0 version
         id: pg0ver
