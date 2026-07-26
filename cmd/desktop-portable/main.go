@@ -205,6 +205,7 @@ func onReady() {
 	mQuit.Click(func() {
 		quitting.Store(true)
 		systray.Quit()
+		w.Terminate()
 	})
 }
 
