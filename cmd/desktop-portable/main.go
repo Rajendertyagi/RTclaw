@@ -64,6 +64,7 @@ type WindowPlacement struct {
 	PtMinPosition    POINT
 	PtMaxPosition    POINT
 	RcNormalPosition RECT
+	RcDevice         RECT
 }
 
 const (
@@ -92,6 +93,7 @@ var (
 	kernel32                   = syscall.NewLazyDLL("kernel32.dll")
 	procCreateMutex            = kernel32.NewProc("CreateMutexW")
 	procGetLastError           = kernel32.NewProc("GetLastError")
+	procSetLastError           = kernel32.NewProc("SetLastError")
 	user32                     = syscall.NewLazyDLL("user32.dll")
 	showWindow                 = user32.NewProc("ShowWindow")
 	procGetWindowPlacement     = user32.NewProc("GetWindowPlacement")
@@ -104,7 +106,7 @@ var (
 )
 
 const (
-	GWL_WNDPROC = -4
+	GWL_WNDPROC = ^uintptr(3)
 	WM_SETICON  = 0x0080
 	WM_CLOSE    = 0x0010
 	ICON_SMALL  = 0
@@ -240,14 +242,17 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 		setAppIcon(hwnd)
 		loadWindowPlacement(hwnd)
 		wndProcCallback = syscall.NewCallback(wndProc)
+		procSetLastError.Call(0)
 		old, _, _ := procSetWindowLongPtr.Call(
 			hwnd,
-			uintptr(int32(GWL_WNDPROC)),
+			GWL_WNDPROC,
 			wndProcCallback,
 		)
 		if old == 0 {
 			lastErr, _, _ := procGetLastError.Call()
-			log.Printf("SetWindowLongPtr failed: previous WndProc == 0, GetLastError=%d", lastErr)
+			if lastErr != 0 {
+				log.Printf("SetWindowLongPtr failed: previous WndProc == 0, GetLastError=%d", lastErr)
+			}
 		}
 		oldWndProc = old
 	}
