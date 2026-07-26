@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,8 +26,7 @@ import (
 	webview "github.com/webview/webview_go"
 )
 
-//go:embed icon.ico
-var tbIconData []byte
+
 
 var Config = struct {
 	GatewayHost  string
@@ -49,33 +48,7 @@ var Config = struct {
 	HealthPath:   "/health",
 }
 
-type POINT struct {
-	X, Y int32
-}
 
-type RECT struct {
-	Left, Top, Right, Bottom int32
-}
-
-type WindowPlacement struct {
-	Length           uint32
-	Flags            uint32
-	ShowCmd          uint32
-	PtMinPosition    POINT
-	PtMaxPosition    POINT
-	RcNormalPosition RECT
-	RcDevice         RECT
-}
-
-const (
-	SW_SHOWNORMAL     = 1
-	SW_SHOWMAXIMIZED  = 3
-	SW_SHOWMINIMIZED  = 2
-	SW_SHOWNA         = 8
-	SW_HIDE           = 0
-	WPF_SETMINPOSITION = 0x0001
-	MONITOR_DEFAULTTONULL = 0x00000000
-)
 
 var (
 	goclawCmd                 *exec.Cmd
@@ -88,14 +61,13 @@ var (
 	wndProcCallback             uintptr
 	instanceMutex               syscall.Handle
 	wMu                         sync.Mutex
-	restartMu                   sync.Mutex
-	lastRestart                 time.Time
 	kernel32                   = syscall.NewLazyDLL("kernel32.dll")
 	procCreateMutex            = kernel32.NewProc("CreateMutexW")
 	procGetLastError           = kernel32.NewProc("GetLastError")
 	procSetLastError           = kernel32.NewProc("SetLastError")
 	user32                     = syscall.NewLazyDLL("user32.dll")
 	showWindow                 = user32.NewProc("ShowWindow")
+	defWindowProc              = user32.NewProc("DefWindowProcW")
 	procGetWindowPlacement     = user32.NewProc("GetWindowPlacement")
 	procSetWindowPlacement     = user32.NewProc("SetWindowPlacement")
 	procMonitorFromRect        = user32.NewProc("MonitorFromRect")
@@ -111,46 +83,11 @@ const (
 	WM_CLOSE    = 0x0010
 	ICON_SMALL  = 0
 	ICON_BIG    = 1
+	
+	toastAppID = "com.goclaw.portable"
 )
 
-// Custom window procedure intercepts WM_CLOSE to hide-to-tray instead of closing.
-func wndProc(hwnd uintptr, msg uint32, wparam, lparam uintptr) uintptr {
-	if msg == WM_CLOSE {
-		showWindow.Call(hwnd, SW_HIDE)
-		ShowToast("GoClaw", "Window minimized to tray")
-		return 0
-	}
 
-	if oldWndProc != 0 {
-		ret, _, _ := procCallWindowProc.Call(oldWndProc, uintptr(hwnd), uintptr(msg), wparam, lparam)
-		return ret
-	}
-
-	return 0
-}
-
-func ensureSingleInstance(name string) bool {
-	h, _, _ := procCreateMutex.Call(0, 1, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(name))))
-	// keep the handle so the mutex stays owned for the process lifetime
-	instanceMutex = syscall.Handle(h)
-	lastErr, _, _ := procGetLastError.Call()
-	if lastErr == 183 { // ERROR_ALREADY_EXISTS
-		return false
-	}
-	return true
-}
-
-func setWebview(nw webview.WebView) {
-	wMu.Lock()
-	defer wMu.Unlock()
-	w = nw
-}
-
-func getWebview() webview.WebView {
-	wMu.Lock()
-	defer wMu.Unlock()
-	return w
-}
 
 func main() {
 	if !ensureSingleInstance("GoClawPortableMutex") {
@@ -161,6 +98,8 @@ func main() {
 	// Unified lifecycle: Ctrl+C, SIGTERM, or normal exit all converge to one path.
 	globalCtx, appCancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer appCancel()
+	
+	defer executeGlobalTeardown()
 
 	root := executableDir()
 	dataDir := filepath.Join(root, "data")
@@ -193,10 +132,11 @@ func main() {
 
 	log.Println("Booting pg0 database...")
 	if err := pgMgr.Start("goclaw"); err != nil {
-		log.Fatalf("pg0: %v", err)
+		log.Printf("pg0 start failed: %v", err)
+		return
 	}
 
-	if pg0Bin := findPg0BinDir(); pg0Bin != "" {
+	if pg0Bin := findPg0BinDir(root); pg0Bin != "" {
 		os.Setenv("PATH", pg0Bin+string(filepath.ListSeparator)+os.Getenv("PATH"))
 	}
 	if pythonDir := findPythonDir(root); pythonDir != "" {
@@ -210,12 +150,22 @@ func main() {
 	go pgMgr.HealthCheckLoop()
 
 	goclawExe := filepath.Join(root, "goclaw.exe")
-	goclawCmd = startSilent(goclawExe)
-	waitForURL(gatewayURL(Config.HealthPath), Config.StartTimeout)
+	var err error
+	goclawCmd, err = startSilent(goclawExe)
+	if err != nil {
+		log.Printf("failed to start goclaw: %v", err)
+		return
+	}
+	if err := waitForURL(globalCtx, gatewayURL(Config.HealthPath), Config.StartTimeout); err != nil {
+		log.Printf("goclaw health check failed: %v", err)
+		return
+	}
 
 	log.Println("GoClaw background services ready — starting system tray on dedicated goroutine...")
 	go func() {
-		systray.Register(onReady, onExit)
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		systray.Run(onReady, onExit)
 	}()
 
 	// Webview runs on the main thread; systray pumps Win32 events independently.
@@ -225,12 +175,15 @@ func main() {
 	if token != "" {
 		initJS := fmt.Sprintf(`(function(){
 var k="goclaw:auth";
-if(!localStorage.getItem(k)){
-localStorage.setItem(k,JSON.stringify({
-state:{token:"%s",userId:"system",senderID:""},version:0
-}));
+var existing = localStorage.getItem(k);
+var data = existing ? JSON.parse(existing) : {state: {}, version: 0};
+if (!data.state) data.state = {};
+if (data.state.token !== "%s") {
+	data.state.token = "%s";
+	data.state.userId = "system";
+	localStorage.setItem(k, JSON.stringify(data));
 }
-})()`, token)
+})()`, token, token)
 		w.Init(initJS)
 	}
 	w.SetTitle(Config.WindowTitle)
@@ -268,24 +221,11 @@ state:{token:"%s",userId:"system",senderID:""},version:0
 
 	w.Run()
 
-	// Single teardown path for all exit routes (user close, Quit menu, OS signal).
-	executeGlobalTeardown()
+	// Destroy must be called on the main UI thread (per WebView2 COM rules)
+	w.Destroy()
 }
 
-// acquireRestartCooldown returns true if the restart is allowed (cooldown elapsed).
-func acquireRestartCooldown() bool {
-	restartMu.Lock()
-	defer restartMu.Unlock()
-	if time.Since(lastRestart) < 5*time.Second {
-		return false
-	}
-	lastRestart = time.Now()
-	return true
-}
 
-// releaseRestartCooldown is a no-op for now; kept for symmetry in case we want to extend behavior.
-func releaseRestartCooldown() {
-}
 
 func onReady() {
 	systray.SetIcon(iconData())
@@ -314,16 +254,13 @@ func onReady() {
 	})
 	mRestart.Click(func() {
 		go func() {
-			// simple cooldown to avoid rapid repeated restarts
-			if !acquireRestartCooldown() {
-				ShowToast("GoClaw", "Restart cooldown active")
-				return
-			}
-			defer releaseRestartCooldown()
-
 			if err := pgMgr.Restart("goclaw"); err != nil {
 				log.Printf("Failed to restart pg0: %v", err)
-				ShowToast("GoClaw", "DB restart failed")
+				if err.Error() == "restart cooldown active" {
+					ShowToast("GoClaw", "Restart cooldown active")
+				} else {
+					ShowToast("GoClaw", "DB restart failed")
+				}
 			} else {
 				ShowToast("GoClaw", "Database restarted successfully")
 			}
@@ -364,10 +301,6 @@ func executeGlobalTeardown() {
 			pgMgr.Close()
 		}
 
-		if gv := getWebview(); gv != nil {
-			gv.Destroy()
-		}
-
 		// Remove systray icon only once
 		systray.Quit()
 
@@ -397,8 +330,6 @@ func showAppWindow(forceNormal bool) {
 	}
 }
 
-const toastAppID = "com.goclaw.portable"
-
 func ShowToast(title, msg string) {
 	notification := toast.Notification{
 		AppID:   toastAppID,
@@ -410,25 +341,7 @@ func ShowToast(title, msg string) {
 	}
 }
 
-func iconData() []byte { return tbIconData }
 
-func setAppIcon(hwnd uintptr) {
-	data := iconData()
-	if len(data) == 0 {
-		return
-	}
-	hicon, _, _ := procCreateIconFromResource.Call(
-		uintptr(unsafe.Pointer(&data[0])),
-		uintptr(len(data)),
-		1,
-		0x00030000,
-		0, 0, 0,
-	)
-	if hicon != 0 {
-		procSendMessageW.Call(hwnd, WM_SETICON, ICON_BIG, hicon)
-		procSendMessageW.Call(hwnd, WM_SETICON, ICON_SMALL, hicon)
-	}
-}
 
 func shutdownGoclaw(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
@@ -481,15 +394,16 @@ func runSilent(name string, args ...string) {
 	}
 }
 
-func startSilent(name string, args ...string) *exec.Cmd {
+// startSilent starts a process hidden and returns the Cmd or an error.
+func startSilent(name string, args ...string) (*exec.Cmd, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := cmd.Start(); err != nil {
-		log.Fatalf("Failed to start %s: %v", name, err)
+		return nil, fmt.Errorf("failed to start %s: %w", name, err)
 	}
-	return cmd
+	return cmd, nil
 }
 
 func generateKey(n int) string {
@@ -531,31 +445,7 @@ func saveDotEnv(path string, key, value string) {
 	fmt.Fprintf(f, "%s=%s\n", key, value)
 }
 
-func findPg0BinDir() string {
-	root := executableDir()
-	bin := filepath.Join(root, "bin")
-	if info, err := os.Stat(filepath.Join(bin, "pg_dump.exe")); err == nil && !info.IsDir() {
-		return bin
-	}
-	home, _ := os.UserHomeDir()
-	if home == "" {
-		return ""
-	}
-	installDir := filepath.Join(home, ".pg0", "installation")
-	entries, err := os.ReadDir(installDir)
-	if err != nil {
-		return ""
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			bin := filepath.Join(installDir, e.Name(), "bin")
-			if info, err := os.Stat(filepath.Join(bin, "pg_dump.exe")); err == nil && !info.IsDir() {
-				return bin
-			}
-		}
-	}
-	return ""
-}
+
 
 func findPythonDir(root string) string {
 	pyDir := filepath.Join(root, "python")
@@ -576,80 +466,68 @@ func findUvDir(root string) string {
 	return ""
 }
 
-func waitForURL(url string, timeout time.Duration) {
+// waitForURL polls the given URL until it returns 200 or the timeout/context expires.
+func waitForURL(ctx context.Context, url string, timeout time.Duration) error {
 	client := &http.Client{Timeout: time.Second}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		// respect external cancellation
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waitForURL aborted due to shutdown")
+		default:
+		}
+
 		resp, err := client.Get(url)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
-			return
+			return nil
 		}
 		if resp != nil {
 			resp.Body.Close()
 		}
-		// allow shutdown to interrupt waiting
-		select {
-		case <-globalCtx.Done():
-			log.Println("waitForURL aborted due to shutdown")
-			return
-		default:
-		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	log.Fatalf("Timed out waiting for %s", url)
+	return fmt.Errorf("timed out waiting for %s", url)
 }
 
-func windowPlacementPath() string {
-	return filepath.Join(executableDir(), "data", "window-state.json")
+// Custom window procedure intercepts WM_CLOSE to hide-to-tray instead of closing.
+func wndProc(hwnd uintptr, msg uint32, wparam, lparam uintptr) uintptr {
+	if msg == WM_CLOSE {
+		showWindow.Call(hwnd, SW_HIDE)
+		ShowToast("GoClaw", "Window minimized to tray")
+		return 0
+	}
+
+	if oldWndProc != 0 {
+		ret, _, _ := procCallWindowProc.Call(oldWndProc, uintptr(hwnd), uintptr(msg), wparam, lparam)
+		return ret
+	}
+
+	ret, _, _ := defWindowProc.Call(uintptr(hwnd), uintptr(msg), wparam, lparam)
+	return ret
 }
 
-func loadWindowPlacement(hwnd uintptr) {
-	if hwnd == 0 {
-		return
+func ensureSingleInstance(name string) bool {
+	procSetLastError.Call(0)
+	h, _, _ := procCreateMutex.Call(0, 1, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(name))))
+	// keep the handle so the mutex stays owned for the process lifetime
+	instanceMutex = syscall.Handle(h)
+	lastErr, _, _ := procGetLastError.Call()
+	if lastErr == 183 { // ERROR_ALREADY_EXISTS
+		return false
 	}
-	data, err := os.ReadFile(windowPlacementPath())
-	if err != nil {
-		return
-	}
-	var wp WindowPlacement
-	if err := json.Unmarshal(data, &wp); err != nil {
-		return
-	}
-	wp.Length = uint32(unsafe.Sizeof(wp))
-
-	mon, _, _ := procMonitorFromRect.Call(
-		uintptr(unsafe.Pointer(&wp.RcNormalPosition)),
-		MONITOR_DEFAULTTONULL,
-	)
-	if mon == 0 {
-		log.Println("Saved window position is off-screen. Falling back to defaults.")
-		return
-	}
-
-	if wp.ShowCmd == SW_SHOWMINIMIZED {
-		wp.Flags |= WPF_SETMINPOSITION
-		wp.ShowCmd = SW_SHOWNORMAL
-	}
-
-	_, _, _ = procSetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp)))
-	log.Println("Window position restored.")
+	return true
 }
 
-func saveWindowPlacement(hwnd uintptr) {
-	if hwnd == 0 {
-		return
-	}
-	var wp WindowPlacement
-	wp.Length = uint32(unsafe.Sizeof(wp))
+func setWebview(nw webview.WebView) {
+	wMu.Lock()
+	defer wMu.Unlock()
+	w = nw
+}
 
-	ret, _, _ := procGetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp)))
-	if ret != 0 {
-		data, err := json.MarshalIndent(wp, "", "  ")
-		if err == nil {
-			_ = os.MkdirAll(filepath.Join(executableDir(), "data"), 0755)
-			_ = os.WriteFile(windowPlacementPath(), data, 0644)
-			log.Println("Window position saved.")
-		}
-	}
+func getWebview() webview.WebView {
+	wMu.Lock()
+	defer wMu.Unlock()
+	return w
 }

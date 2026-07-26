@@ -21,14 +21,15 @@ import (
 
 // PGManager manages the pg0 PostgreSQL process lifecycle.
 type PGManager struct {
-	pg0Path   string
-	pidFile   string
-	dbName    string
-	db        *sql.DB
-	mu        sync.Mutex
-	restartMu sync.Mutex
-	ctx       context.Context
-	cancel    context.CancelFunc
+	pg0Path     string
+	pidFile     string
+	dbName      string
+	db          *sql.DB
+	mu          sync.Mutex
+	restartMu   sync.Mutex
+	lastRestart time.Time
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 func NewPGManager(pg0Path, dataDir string) *PGManager {
@@ -153,6 +154,11 @@ func (m *PGManager) Close() {
 func (m *PGManager) Restart(name string) error {
 	m.restartMu.Lock()
 	defer m.restartMu.Unlock()
+
+	if time.Since(m.lastRestart) < 5*time.Second {
+		return errors.New("restart cooldown active")
+	}
+	m.lastRestart = time.Now()
 
 	m.Stop()
 	return m.Start(name)
@@ -281,4 +287,29 @@ func (m *PGManager) cleanStaleLockNatively() error {
 	log.Printf("Removing dead lock file for stale PID %d", pid)
 	_ = os.Remove(m.pidFile)
 	return nil
+}
+
+func findPg0BinDir(root string) string {
+	bin := filepath.Join(root, "bin")
+	if info, err := os.Stat(filepath.Join(bin, "pg_dump.exe")); err == nil && !info.IsDir() {
+		return bin
+	}
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return ""
+	}
+	installDir := filepath.Join(home, ".pg0", "installation")
+	entries, err := os.ReadDir(installDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			bin := filepath.Join(installDir, e.Name(), "bin")
+			if info, err := os.Stat(filepath.Join(bin, "pg_dump.exe")); err == nil && !info.IsDir() {
+				return bin
+			}
+		}
+	}
+	return ""
 }
