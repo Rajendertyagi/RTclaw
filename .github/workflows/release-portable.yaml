@@ -145,6 +145,10 @@ jobs:
         shell: bash
         run: cp -r migrations build/
 
+      - name: Copy bundled skills
+        shell: bash
+        run: cp -r skills build/bundled-skills
+
       - name: Package portable zip
         shell: powershell
         run: |

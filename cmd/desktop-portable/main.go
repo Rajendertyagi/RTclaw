@@ -362,8 +362,11 @@ func onReady() {
 		}()
 	})
 	mQuit.Click(func() {
+		if appCancel != nil {
+			appCancel() // signal globalCtx.Done()
+		}
 		if gv := getWebview(); gv != nil {
-			gv.Terminate() // teardown handles systray.Quit
+			gv.Terminate()
 		}
 	})
 }
@@ -574,20 +577,36 @@ func waitForURL(ctx context.Context, url string, timeout time.Duration) error {
 	return fmt.Errorf("timed out waiting for %s", url)
 }
 
+var settingIcon bool
+
 // Custom window procedure intercepts WM_CLOSE to hide-to-tray instead of closing.
 func wndProc(hwnd uintptr, msg uint32, wparam, lparam uintptr) uintptr {
-	if msg == WM_CLOSE {
+	switch msg {
+	case WM_CLOSE:
 		showWindow.Call(hwnd, SW_HIDE)
 		ShowToast("GoClaw", "Window minimized to tray")
 		return 0
+
+	case WM_SETICON:
+		if !settingIcon {
+			settingIcon = true
+			var prevIcon uintptr
+			if oldWndProc != 0 {
+				prevIcon, _, _ = procCallWindowProc.Call(oldWndProc, hwnd, uintptr(msg), wparam, lparam)
+			} else {
+				prevIcon, _, _ = defWindowProc.Call(hwnd, uintptr(msg), wparam, lparam)
+			}
+			setAppIcon(hwnd)
+			settingIcon = false
+			return prevIcon
+		}
 	}
 
 	if oldWndProc != 0 {
-		ret, _, _ := procCallWindowProc.Call(oldWndProc, uintptr(hwnd), uintptr(msg), wparam, lparam)
+		ret, _, _ := procCallWindowProc.Call(oldWndProc, hwnd, uintptr(msg), wparam, lparam)
 		return ret
 	}
-
-	ret, _, _ := defWindowProc.Call(uintptr(hwnd), uintptr(msg), wparam, lparam)
+	ret, _, _ := defWindowProc.Call(hwnd, uintptr(msg), wparam, lparam)
 	return ret
 }
 
