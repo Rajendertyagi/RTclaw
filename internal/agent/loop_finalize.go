@@ -14,7 +14,6 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
-	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 // isUserFilePopulated checks if USER.md has been filled with actual user data
@@ -48,7 +47,7 @@ func (l *Loop) finalizeRun(
 	// BEFORE sanitize strips them. Covers cases where a tool returned its
 	// artifact via the ForLLM MEDIA: prefix but the agent relayed it as plain
 	// text (e.g. PDF from exec/weasyprint, TTS mp3 paths the LLM quotes back).
-	if extracted := extractMediaFromContent(rs.finalContent, tools.ToolWorkspaceFromCtx(ctx)); len(extracted) > 0 {
+	if extracted := extractMediaFromContent(rs.finalContent, l.mediaEgressRoots(ctx)); len(extracted) > 0 {
 		rs.mediaResults = append(rs.mediaResults, extracted...)
 	}
 
@@ -67,13 +66,14 @@ func (l *Loop) finalizeRun(
 		rs.finalContent += "\n\n---\n_" + i18n.T(locale, i18n.MsgSkillNudgePostscript) + "_"
 	}
 
-	// 7. Fallback for empty content
-	if rs.finalContent == "" {
-		if len(rs.asyncToolCalls) > 0 {
-			rs.finalContent = "..."
-		} else {
-			rs.finalContent = "..."
-		}
+	// 7. Fallback only when there is no other deliverable output. Media-only
+	// runs must remain media-only instead of gaining a visible caption. Use a
+	// meaningful localized message instead of the old meaningless "...".
+	hasDeliverableOutput := len(rs.mediaResults) > 0 ||
+		len(req.ForwardMedia) > 0 ||
+		req.ContentSuffix != ""
+	if rs.finalContent == "" && !hasDeliverableOutput {
+		rs.finalContent = i18n.T(store.LocaleFromContext(ctx), i18n.MsgEmptyReplyFallback)
 	}
 
 	// Append content suffix (e.g. image markdown for WS) before saving to session.
@@ -200,6 +200,9 @@ func (l *Loop) finalizeRun(
 		slog.Info("agent loop: NO_REPLY detected, suppressing delivery",
 			"agent", l.id, "session", req.SessionKey)
 		rs.finalContent = ""
+		if req.ContentSuffix != "" {
+			rs.finalContent = deduplicateMediaSuffix("", req.ContentSuffix)
+		}
 	}
 
 	// 9. Maybe summarize

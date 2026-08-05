@@ -96,9 +96,12 @@ func setupToolRegistry(
 	// Browser automation tool
 	if cfg.Tools.Browser.Enabled {
 		var opts []browser.Option
+		if cfg.Tools.Browser.Backend != "" {
+			opts = append(opts, browser.WithBackend(browser.Backend(cfg.Tools.Browser.Backend)))
+		}
 		if cfg.Tools.Browser.RemoteURL != "" {
 			opts = append(opts, browser.WithRemoteURL(cfg.Tools.Browser.RemoteURL))
-			slog.Info("browser tool enabled", "remote", cfg.Tools.Browser.RemoteURL)
+			slog.Info("browser tool enabled", "remote", cfg.Tools.Browser.RemoteURL, "backend", cfg.Tools.Browser.Backend)
 		} else {
 			opts = append(opts, browser.WithHeadless(cfg.Tools.Browser.Headless))
 			slog.Info("browser tool enabled", "headless", cfg.Tools.Browser.Headless)
@@ -616,6 +619,24 @@ func setupSkillsSystem(
 					if len(seededSkills) > 0 {
 						seeder.CheckDepsAsync(seededSkills, msgBus)
 					}
+				}
+			}
+
+			// Register on-disk managed skills (skills-store) that are missing from
+			// the database. A skill placed directly into the tenant's skills-store
+			// without a skills row is invisible to agents (skill visibility is
+			// DB-driven), which manifests as goclaw not detecting a skill the user
+			// typed triggers for. Reconcile closes that gap idempotently.
+			if reconcileStore, ok := pgStores.Skills.(skills.ManagedSkillStore); ok {
+				reconciler := skills.NewReconciler(reconcileStore)
+				if n, err := reconciler.Reconcile(
+					context.Background(),
+					store.MasterTenantID,
+					storeDirs[0],
+				); err != nil {
+					slog.Warn("skills-store reconcile failed", "error", err)
+				} else if n > 0 {
+					slog.Info("skills-store reconcile complete", "registered", n)
 				}
 			}
 		}

@@ -400,6 +400,11 @@ func openAIProviderDefaults(providerType, apiBase string) (string, string) {
 			apiBase = store.MiniMaxDefaultAPIBase
 		}
 		return apiBase, store.MiniMaxDefaultModel
+	case store.ProviderAtlasCloud:
+		if apiBase == "" {
+			apiBase = store.AtlasCloudDefaultAPIBase
+		}
+		return apiBase, store.AtlasCloudDefaultModel
 	default:
 		return apiBase, ""
 	}

@@ -483,3 +483,66 @@ func TestEnsureMCPPrefix(t *testing.T) {
 		})
 	}
 }
+
+// TestIsAllCapsPlaceholder_KeepsBusinessCodes guards a production incident:
+// all-caps business identifiers (bank codes, currency codes, enum values) were
+// classified as LLM placeholders and silently dropped from tool arguments, so a
+// filtered query silently became an unfiltered one and the model reported totals
+// for the whole dataset as if they were the filtered result.
+func TestIsAllCapsPlaceholder_KeepsBusinessCodes(t *testing.T) {
+	keep := []string{
+		"BKASH", "NAGAD", "ROCKET", "ROCKETC", // bank codes
+		"BDT", "VND", "USD", "PKR", "MMK", // currency codes
+		"SUCCESS", "PENDING", "ALL", // enum values
+		"VCB", "SPACEPROXY",
+	}
+	for _, s := range keep {
+		if isAllCapsPlaceholder(s) {
+			t.Errorf("business identifier %q must NOT be treated as a placeholder", s)
+		}
+	}
+
+	drop := []string{
+		"SHOULD_NOT_BE_HERE", "DO_NOT_SEND", "NOT_APPLICABLE", // multi-word
+		"PLACEHOLDER", "TODO", "TBD", "XXX", "CHANGEME", // known single-word
+	}
+	for _, s := range drop {
+		if !isAllCapsPlaceholder(s) {
+			t.Errorf("placeholder %q must be detected", s)
+		}
+	}
+}
+
+// TestStripEmptyOptionalArgs_KeepsAllCapsBusinessCode is the end-to-end guard for
+// the same incident, at the layer that actually mutates the outbound arguments.
+func TestStripEmptyOptionalArgs_KeepsAllCapsBusinessCode(t *testing.T) {
+	bt := &BridgeTool{
+		requiredSet: map[string]bool{"merchant_id": true},
+		inputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"merchant_id": map[string]any{"type": "string"},
+				"bank_code":   map[string]any{"type": "string"},
+				"currency":    map[string]any{"type": "string"},
+				"note":        map[string]any{"type": "string"},
+			},
+		},
+	}
+
+	cleaned := bt.stripEmptyOptionalArgs(map[string]any{
+		"merchant_id": "CPS_C1",
+		"bank_code":   "BKASH",              // optional all-caps business code → keep
+		"currency":    "BDT",                // optional all-caps business code → keep
+		"note":        "SHOULD_NOT_BE_HERE", // real placeholder → strip
+	})
+
+	if cleaned["bank_code"] != "BKASH" {
+		t.Errorf("bank_code must survive, got %v", cleaned["bank_code"])
+	}
+	if cleaned["currency"] != "BDT" {
+		t.Errorf("currency must survive, got %v", cleaned["currency"])
+	}
+	if _, ok := cleaned["note"]; ok {
+		t.Error("multi-word all-caps placeholder should still be stripped")
+	}
+}

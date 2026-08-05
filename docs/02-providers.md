@@ -96,6 +96,7 @@ Supported price units: input, output, cache read, cache write, reasoning, reques
 | Provider | API Base | Default Model | Notes |
 |----------|----------|---------------|-------|
 | openai | `https://api.openai.com/v1` | `gpt-4o` | |
+| atlascloud | `https://api.atlascloud.ai/v1` | `qwen/qwen3.5-flash` | Atlas Cloud OpenAI-compatible LLM endpoint |
 | openrouter | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4-5-20250929` | Model must contain `/` |
 | groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` | |
 | deepseek | `https://api.deepseek.com/v1` | `deepseek-chat` | |

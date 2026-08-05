@@ -76,6 +76,7 @@ type Manager struct {
 	health           map[string]ChannelHealth
 	bus              *bus.MessageBus
 	runs             sync.Map // runID string → *RunContext
+	mediaClaims      sync.Map // temp media path → struct{}, in-flight dispatch claims
 	dispatchTask     *asyncTask
 	mu               sync.RWMutex
 	contactCollector *store.ContactCollector

@@ -23,6 +23,7 @@ func (c *Config) MaskedCopy() *Config {
 	// Mask provider API keys
 	maskNonEmpty(&cp.Providers.Anthropic.APIKey)
 	maskNonEmpty(&cp.Providers.OpenAI.APIKey)
+	maskNonEmpty(&cp.Providers.AtlasCloud.APIKey)
 	maskNonEmpty(&cp.Providers.OpenRouter.APIKey)
 	maskNonEmpty(&cp.Providers.Groq.APIKey)
 	maskNonEmpty(&cp.Providers.DeepSeek.APIKey)
@@ -72,6 +73,7 @@ func (c *Config) StripSecrets() {
 	// Provider API keys
 	c.Providers.Anthropic.APIKey = ""
 	c.Providers.OpenAI.APIKey = ""
+	c.Providers.AtlasCloud.APIKey = ""
 	c.Providers.OpenRouter.APIKey = ""
 	c.Providers.Groq.APIKey = ""
 	c.Providers.DeepSeek.APIKey = ""
@@ -126,6 +128,7 @@ func (c *Config) StripMaskedSecrets() {
 	// Provider API keys
 	stripIfMasked(&c.Providers.Anthropic.APIKey)
 	stripIfMasked(&c.Providers.OpenAI.APIKey)
+	stripIfMasked(&c.Providers.AtlasCloud.APIKey)
 	stripIfMasked(&c.Providers.OpenRouter.APIKey)
 	stripIfMasked(&c.Providers.Groq.APIKey)
 	stripIfMasked(&c.Providers.DeepSeek.APIKey)

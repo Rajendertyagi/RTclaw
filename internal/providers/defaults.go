@@ -2,6 +2,8 @@ package providers
 
 import (
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 )
 
@@ -20,6 +22,32 @@ const (
 	StdioScanBufInit = 256 * 1024       // 256KB initial buffer
 	StdioScanBufMax  = 10 * 1024 * 1024 // 10MB max for large protocol messages
 )
+
+// Idle connection pooling, overridable for deployments that raise agent-run
+// concurrency:
+//
+//	GOCLAW_HTTP_MAX_IDLE_CONNS=100
+//	GOCLAW_HTTP_MAX_IDLE_CONNS_PER_HOST=10
+//
+// When nearly all traffic goes to one provider host, the per-host limit is the
+// one that binds: every concurrent request past it gets a fresh TCP+TLS
+// handshake, and its connection is closed rather than pooled on completion.
+// A self-hosted or in-network provider has no reason to be throttled this way,
+// so those deployments should raise it to match LaneMain.
+const (
+	defaultMaxIdleConns        = 100
+	defaultMaxIdleConnsPerHost = 10
+)
+
+// transportEnv reads a positive int from an env var, falling back to defaultVal.
+func transportEnv(key string, defaultVal int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultVal
+}
 
 // NewDefaultTransport returns an http.Transport with per-stage timeouts but no
 // overall deadline. The absence of Client.Timeout allows LLM streaming responses
@@ -57,8 +85,8 @@ func NewDefaultTransport() *http.Transport {
 		IdleConnTimeout:       90 * time.Second, // close idle keep-alive connections
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
+		MaxIdleConns:          transportEnv("GOCLAW_HTTP_MAX_IDLE_CONNS", defaultMaxIdleConns),
+		MaxIdleConnsPerHost:   transportEnv("GOCLAW_HTTP_MAX_IDLE_CONNS_PER_HOST", defaultMaxIdleConnsPerHost),
 	}
 }
 

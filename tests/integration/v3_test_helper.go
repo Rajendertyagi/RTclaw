@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/security"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
@@ -89,7 +90,7 @@ func seedTenantAgent(t *testing.T, db *sql.DB) (tenantID, agentID uuid.UUID) {
 	_, err := db.Exec(
 		`INSERT INTO tenants (id, name, slug, status) VALUES ($1, $2, $3, 'active')
 		 ON CONFLICT DO NOTHING`,
-		tenantID, "test-tenant-"+tenantID.String()[:8], "t"+tenantID.String()[:8])
+		tenantID, "test-tenant-"+tenantID.String()[:8], tenantSlug(tenantID))
 	if err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
@@ -176,6 +177,34 @@ func seedTenantAgent(t *testing.T, db *sql.DB) (tenantID, agentID uuid.UUID) {
 // tenantCtx returns a context with tenant ID set for store scoping.
 func tenantCtx(tenantID uuid.UUID) context.Context {
 	return store.WithTenantID(context.Background(), tenantID)
+}
+
+// tenantSlug returns the slug seedTenantAgent assigns to a seeded tenant.
+// Single source of truth so on-disk layout in a test cannot drift from the seed.
+func tenantSlug(tenantID uuid.UUID) string {
+	return "t" + tenantID.String()[:8]
+}
+
+// tenantCtxSlug is tenantCtx plus the tenant slug. Real runs carry the slug in
+// context, and tools that resolve a tenant-scoped workspace need it: without a
+// slug config.TenantScopedDir deliberately falls back to an id-named directory
+// (see its doc comment — an empty slug must never resolve to the tenants/ parent).
+func tenantCtxSlug(tenantID uuid.UUID) context.Context {
+	return store.WithTenantSlug(tenantCtx(tenantID), tenantSlug(tenantID))
+}
+
+// tenantWorkspaceDir creates and returns the tenant-scoped workspace root under
+// base — what config.TenantWorkspace resolves to for a seeded (non-master) tenant.
+// Vault document paths are stored relative to THIS directory, not to base: base is
+// the global workspace root wired once at boot, and one tool instance serves every
+// tenant. Fixtures written straight to base are only reachable by the master tenant.
+func tenantWorkspaceDir(t *testing.T, base string, tenantID uuid.UUID) string {
+	t.Helper()
+	dir := config.TenantWorkspace(base, tenantID, tenantSlug(tenantID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir tenant workspace: %v", err)
+	}
+	return dir
 }
 
 // userCtx returns a context with both tenant ID and user ID set.

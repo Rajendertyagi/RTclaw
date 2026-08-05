@@ -43,6 +43,17 @@ func registerProviders(registry *providers.Registry, cfg *config.Config, modelRe
 		slog.Info("registered provider", "name", "openai")
 	}
 
+	if cfg.Providers.AtlasCloud.APIKey != "" {
+		base := cfg.Providers.AtlasCloud.APIBase
+		if base == "" {
+			base = store.AtlasCloudDefaultAPIBase
+		}
+		prov := providers.NewOpenAIProvider("atlascloud", cfg.Providers.AtlasCloud.APIKey, base, store.AtlasCloudDefaultModel)
+		prov.WithProviderType(store.ProviderAtlasCloud)
+		registry.Register(prov)
+		slog.Info("registered provider", "name", "atlascloud")
+	}
+
 	if cfg.Providers.OpenRouter.APIKey != "" {
 		orProv := providers.NewOpenAIProvider("openrouter", cfg.Providers.OpenRouter.APIKey, "https://openrouter.ai/api/v1", "anthropic/claude-sonnet-4-5-20250929")
 		orProv.WithSiteInfo("https://goclaw.sh", "GoClaw")
@@ -461,6 +472,11 @@ func openAIProviderDefaults(providerType, apiBase string) (string, string) {
 			apiBase = store.MiniMaxDefaultAPIBase
 		}
 		return apiBase, store.MiniMaxDefaultModel
+	case store.ProviderAtlasCloud:
+		if apiBase == "" {
+			apiBase = store.AtlasCloudDefaultAPIBase
+		}
+		return apiBase, store.AtlasCloudDefaultModel
 	default:
 		return apiBase, ""
 	}

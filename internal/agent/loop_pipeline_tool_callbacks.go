@@ -168,6 +168,7 @@ func (l *Loop) makeExecuteToolRaw(req *RunRequest) func(ctx context.Context, tc 
 			Role:       "tool",
 			Content:    result.ForLLM,
 			ToolCallID: tc.ID,
+			ToolName:   tc.Name,
 			IsError:    result.IsError,
 		}
 		return msg, &toolRawResult{result: result, duration: dur, start: start, spanID: spanID, toolName: registryName, rawName: tc.Name}, nil
@@ -384,6 +385,6 @@ func makeToolEmitRun(l *Loop, req *RunRequest) func(AgentEvent) {
 		event.Channel = req.Channel
 		event.ChatID = req.ChatID
 		event.TenantID = l.tenantID
-		l.emit(event)
+		l.emit(redactDelegationAgentEvent(req, event))
 	}
 }

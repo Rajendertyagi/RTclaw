@@ -152,6 +152,7 @@ func sanitizeHistory(msgs []providers.Message) ([]providers.Message, int) {
 						Role:       "tool",
 						Content:    "[Tool result missing — session was compacted]",
 						ToolCallID: tc.ID,
+						ToolName:   tc.Name,
 					})
 					dropped++
 				}

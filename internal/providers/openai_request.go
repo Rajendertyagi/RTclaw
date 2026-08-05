@@ -146,13 +146,27 @@ func (p *OpenAIProvider) buildRequestBody(model string, req ChatRequest, stream 
 			// (FunctionResponse.name). Most other OpenAI-compat hosts (Together, Groq,
 			// vLLM) either ignore or reject unknown fields — gate to Gemini only to
 			// avoid silent 400s on stricter proxies.
-			if supportsThoughtSignature {
-				if name := toolNameByID[m.ToolCallID]; name != "" {
-					msg["name"] = name
-				} else if m.Role == "tool" {
-					slog.Warn("openai: tool msg without matching tool_call",
-						"provider", p.name, "tool_call_id", m.ToolCallID)
+			if supportsThoughtSignature && m.Role == "tool" {
+				// Prefer the name carried on the message: it survives pruning,
+				// truncation and tool_call collapse. Fall back to the reverse index
+				// for history persisted before Message.ToolName existed.
+				name := m.ToolName
+				if name == "" {
+					name = toolNameByID[m.ToolCallID]
 				}
+				if name == "" {
+					// Gemini pairs functionCall↔functionResponse by name and has no
+					// tool_call_id to fall back on, so an empty name is a hard 400
+					// ("Name cannot be empty"). A synthetic name is not an option
+					// either — it would match no prior functionCall. Dropping the
+					// unlabelled result is the only way to keep the request valid.
+					// Reachable only for legacy history whose assistant tool_call is
+					// already out of the window, so nothing dangles by removing it.
+					slog.Warn("openai: dropping tool result with unresolvable tool name",
+						"provider", p.name, "tool_call_id", m.ToolCallID)
+					continue
+				}
+				msg["name"] = name
 			}
 		}
 
